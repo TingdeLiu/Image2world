@@ -54,13 +54,14 @@ cd ..
 ### 第 6 步：安装 SHARP（Apple 单图高斯泼溅重建）
 SHARP 负责把修补后的干净背景板重建成可导航的 3D 高斯泼溅——也就是世界的"环境"本体。
 
-> ⚠️ **不装它不会报错，只会静默降级。** 生成流程会照常跑完并产出世界，但背景换成一个本地房间模板，
-> 进度详情里仅有一句 `SHARP was unavailable; using the local room template`。
-> 判断依据：真实重建的 `0-world-full_res.ply` 有上百万个 splat，且 PLY 头里带
+> ⚠️ **不装它，生成会直接失败。** 早期版本会静默降级到本地房间模板——结果是"生成成功"但看到的是别人的房间，
+> 所以现在改为报错退出（`background_failed`），暂存目录一并清理。
+> 判断重建是否真实：`0-world-full_res.ply` 应有上百万个 splat，且 PLY 头里带
 > `extrinsic` / `intrinsic` / `disparity` 等 SHARP 专有 element。
 
 ```bash
-# ml-sharp 已作为子目录随仓库提供（backend/ml-sharp）
+# 从仓库根目录执行；ml-sharp 与其他第三方仓库一样不入库，需自行克隆
+git clone https://github.com/apple/ml-sharp.git backend/ml-sharp
 cd backend/ml-sharp
 pip install -e . --no-deps
 cd ../..

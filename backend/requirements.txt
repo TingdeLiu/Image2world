@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+numpy
+opencv-python
+pillow
+torch
+torchvision
+torchaudio
+transformers
+diffusers
+trimesh
+omegaconf
+einops
+simple-lama-inpainting
+huggingface_hub
+pytest

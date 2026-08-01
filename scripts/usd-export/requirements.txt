@@ -1,0 +1,9 @@
+# Requires Python >=3.11,<3.13 (usd-convert-gsplat does not build for 3.10,
+# which is what the backend/ conda environment pins). Install into a separate
+# virtual environment -- see README.md.
+usd-convert-gsplat[usd]==0.1.15
+trimesh>=4.12
+pillow>=10.0.0
+# trimesh needs scipy to compute vertex normals for GLB meshes.
+scipy>=1.11
+pytest>=8.0
