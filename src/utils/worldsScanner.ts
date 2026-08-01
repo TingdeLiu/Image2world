@@ -566,6 +566,13 @@ export function sanitizePlacementProject(input: unknown): WorldSceneProject | un
   const normalizedShadowCatcherColor = typeof shadowCatcherColor === 'string' && /^#[0-9a-f]{6}$/i.test(shadowCatcherColor)
     ? shadowCatcherColor.toLowerCase()
     : undefined
+  const spawnPoint = record.spawnPoint
+  const normalizedSpawnPoint: [number, number] | undefined =
+    Array.isArray(spawnPoint) &&
+    spawnPoint.length === 2 &&
+    spawnPoint.every((part) => typeof part === 'number' && Number.isFinite(part))
+      ? [spawnPoint[0] as number, spawnPoint[1] as number]
+      : undefined
 
   return {
     version: PROJECT_VERSION,
@@ -576,6 +583,7 @@ export function sanitizePlacementProject(input: unknown): WorldSceneProject | un
     ...(typeof groundPlaneColliderEnabled === 'boolean' ? { groundPlaneColliderEnabled } : {}),
     ...(normalizedShadowCatcherOpacity !== undefined ? { shadowCatcherOpacity: normalizedShadowCatcherOpacity } : {}),
     ...(normalizedShadowCatcherColor !== undefined ? { shadowCatcherColor: normalizedShadowCatcherColor } : {}),
+    ...(normalizedSpawnPoint ? { spawnPoint: normalizedSpawnPoint } : {}),
   }
 }
 

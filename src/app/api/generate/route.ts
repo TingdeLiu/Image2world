@@ -192,17 +192,47 @@ async function buildBackgroundCollider(worldOutDir: string, signal: AbortSignal)
       'splat',
       'Collision mesh',
     )
-    const data = await res.json() as { collider_glb?: string; ground_plane_offset?: number; face_count?: number }
+    const data = await res.json() as {
+      collider_glb?: string
+      ground_plane_offset?: number
+      face_count?: number
+      bounds_viewer?: { min: number[]; max: number[] }
+    }
     if (!data.collider_glb) throw new Error('backend returned no collider mesh')
 
     fs.writeFileSync(path.join(worldOutDir, '0-world.glb'), Buffer.from(data.collider_glb, 'base64'))
     const groundPlaneOffset = typeof data.ground_plane_offset === 'number' ? data.ground_plane_offset : 0
     console.log(`[Pipeline] Collision mesh written (${data.face_count ?? '?'} faces, ground offset ${groundPlaneOffset.toFixed(3)}).`)
-    return { groundPlaneOffset }
+    return { groundPlaneOffset, boundsViewer: data.bounds_viewer }
   } catch (error) {
     if (signal.aborted) throw error
     console.warn('[Pipeline] Collision mesh unavailable; the world will have no wall collisions:', error)
     return undefined
+  }
+}
+
+/**
+ * Pick a spawn point inside the reconstructed room.
+ *
+ * SHARP reconstructs from where the photo was taken, which is typically outside
+ * the space itself -- measured on a real room, the geometry started 2.1 m in
+ * front of the default spawn, so the player began outside the world looking in,
+ * with nothing but the 200 m ground plane behind them. Stand them just inside
+ * the near edge instead, centred on the room's width.
+ */
+function spawnInsideRoom(bounds?: { min: number[]; max: number[] }) {
+  if (!bounds || bounds.min.length !== 3 || bounds.max.length !== 3) return undefined
+  const [minX, , minZ] = bounds.min
+  const [maxX, , maxZ] = bounds.max
+  const depth = maxZ - minZ
+  if (!Number.isFinite(depth) || depth <= 0) return undefined
+
+  // Step in from the near (camera-facing) edge, but never past the midpoint of
+  // a shallow room.
+  const inset = Math.min(1.5, depth * 0.35)
+  return {
+    x: (minX + maxX) / 2,
+    z: maxZ - inset,
   }
 }
 
@@ -325,6 +355,10 @@ async function runGeneration(
     })
     const collider = await buildBackgroundCollider(worldOutDir, signal)
     const groundPlaneOffset = collider?.groundPlaneOffset ?? 0
+    const spawn = spawnInsideRoom(collider?.boundsViewer)
+    if (spawn) {
+      console.log(`[Pipeline] Spawn placed inside the room at x=${spawn.x.toFixed(2)}, z=${spawn.z.toFixed(2)}.`)
+    }
 
     // 6. Minimal world manifest so the scanner picks up the local .ply splat.
     const worldJson = {
@@ -370,6 +404,7 @@ async function runGeneration(
       // exporter, so it has to carry the calibrated value too.
       groundPlaneOffset,
       groundPlaneColliderEnabled: true,
+      ...(spawn ? { spawnPoint: [spawn.x, spawn.z] as [number, number] } : {}),
     }
     fs.writeFileSync(path.join(worldDir, 'scene.json'), JSON.stringify(sceneJson, null, 2))
 

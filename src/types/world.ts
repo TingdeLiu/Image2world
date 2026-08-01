@@ -82,6 +82,13 @@ export interface WorldSceneProject {
   groundPlaneColliderEnabled?: boolean
   shadowCatcherOpacity?: number
   shadowCatcherColor?: string
+  /**
+   * Where the player starts, as [x, z] on the floor. Reconstruction puts the
+   * camera where the photo was taken, which is usually outside the room, so
+   * generated worlds record a point inside it instead. Absent on older worlds,
+   * which fall back to the origin.
+   */
+  spawnPoint?: [number, number]
 }
 
 export interface WorldVersion {

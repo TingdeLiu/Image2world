@@ -15,6 +15,8 @@ export interface FlyControllerHandle {
 
 interface FlyControllerProps {
   preserveCameraOnMount?: boolean
+  /** Floor position [x, z] the scene wants the camera to start at. */
+  spawnPoint?: [number, number]
 }
 
 const SPEED = 6
@@ -30,7 +32,7 @@ const _up = new THREE.Vector3(0, 1, 0)
 const _move = new THREE.Vector3()
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ')
 
-export const FlyController = forwardRef<FlyControllerHandle, FlyControllerProps>(function FlyController({ preserveCameraOnMount = false }, ref) {
+export const FlyController = forwardRef<FlyControllerHandle, FlyControllerProps>(function FlyController({ preserveCameraOnMount = false, spawnPoint }, ref) {
   const { camera, gl } = useThree()
   const mouseSensitivity = useDebugStore((s) => s.flyMouseSensitivity)
   const keys = useRef(new Set<string>())
@@ -40,7 +42,11 @@ export const FlyController = forwardRef<FlyControllerHandle, FlyControllerProps>
   const smoothPitch = useRef(0)
 
   const reset = useCallback(() => {
-    camera.position.set(CHARACTER_SPAWN.x, CHARACTER_SPAWN.y, CHARACTER_SPAWN.z)
+    camera.position.set(
+      spawnPoint ? spawnPoint[0] : CHARACTER_SPAWN.x,
+      CHARACTER_SPAWN.y,
+      spawnPoint ? spawnPoint[1] : CHARACTER_SPAWN.z,
+    )
     cameraFocusTarget.current = null
     keys.current.clear()
     rawYaw.current = DEFAULT_YAW
@@ -48,7 +54,7 @@ export const FlyController = forwardRef<FlyControllerHandle, FlyControllerProps>
     smoothYaw.current = DEFAULT_YAW
     smoothPitch.current = 0
     camera.quaternion.setFromEuler(_euler.set(0, DEFAULT_YAW, 0))
-  }, [camera])
+  }, [camera, spawnPoint])
 
   const preserveCamera = useCallback(() => {
     cameraFocusTarget.current = null

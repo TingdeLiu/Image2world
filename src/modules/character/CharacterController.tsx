@@ -9,13 +9,18 @@ import { useDebugStore } from '../../store/debug'
 import { isEditableTarget } from '../../utils/dom'
 import {
   CAMERA_EYE_OFFSET,
-  CHARACTER_BODY_SPAWN,
-  CHARACTER_BODY_SPAWN_POSITION,
   CHARACTER_HEIGHT,
+  characterBodySpawn,
+  characterBodySpawnPosition,
 } from './spawn'
 
 export interface CharacterControllerHandle {
   reset: () => void
+}
+
+interface CharacterControllerProps {
+  /** Floor position [x, z] the scene wants the player to start at. */
+  spawnPoint?: [number, number]
 }
 
 const SPEED = 4
@@ -33,8 +38,8 @@ const _dollyForward = new THREE.Vector3()
 const _move = new THREE.Vector3()
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ')
 
-export const CharacterController = forwardRef<CharacterControllerHandle>(
-  function CharacterController(_, ref) {
+export const CharacterController = forwardRef<CharacterControllerHandle, CharacterControllerProps>(
+  function CharacterController({ spawnPoint }, ref) {
   const bodyRef = useRef<React.ComponentRef<typeof RigidBody>>(null)
   const { camera, gl } = useThree()
   const mouseSensitivity = useDebugStore((s) => s.flyMouseSensitivity)
@@ -53,7 +58,7 @@ export const CharacterController = forwardRef<CharacterControllerHandle>(
   useImperativeHandle(ref, () => ({
     reset: () => {
       if (!bodyRef.current) return
-      bodyRef.current.setTranslation(CHARACTER_BODY_SPAWN, true)
+      bodyRef.current.setTranslation(characterBodySpawn(spawnPoint), true)
       bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true)
       bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true)
       rawYaw.current = DEFAULT_YAW
@@ -217,7 +222,7 @@ export const CharacterController = forwardRef<CharacterControllerHandle>(
   return (
     <RigidBody
       ref={bodyRef}
-      position={CHARACTER_BODY_SPAWN_POSITION}
+      position={characterBodySpawnPosition(spawnPoint)}
       enabledRotations={[false, false, false]}
       linearDamping={0}
     >

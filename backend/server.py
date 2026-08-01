@@ -947,12 +947,27 @@ async def splat_to_collider(
             glb_bytes = glb_path.read_bytes()
 
         size = mesh.bounds[1] - mesh.bounds[0]
+
+        # Report the extent in viewer space so the caller can place the camera
+        # inside the room. SHARP reconstructs from the photographer's viewpoint,
+        # which is usually *outside* the space being photographed -- spawning at
+        # the origin drops the player behind all the geometry, facing it from
+        # the void. Viewer space flips Y and Z (the manifest's flip_y) and lifts
+        # the floor to y=0.
+        offset = ground_offset or 0.0
+        lo, hi = mesh.bounds
+        bounds_viewer = {
+            "min": [float(lo[0]), float(-hi[1] + offset), float(-hi[2])],
+            "max": [float(hi[0]), float(-lo[1] + offset), float(-lo[2])],
+        }
+
         print(f"Collider built: {len(mesh.faces)} faces, room {size[0]:.1f}x{size[1]:.1f}x{size[2]:.1f} m")
         return {
             "collider_glb": base64.b64encode(glb_bytes).decode("ascii"),
             "ground_plane_offset": ground_offset,
             "face_count": int(len(mesh.faces)),
             "room_size": [float(v) for v in size],
+            "bounds_viewer": bounds_viewer,
         }
 
     except Exception as e:
