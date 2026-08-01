@@ -8,8 +8,8 @@ import * as THREE from 'three'
 import { ObjectRenderMode, type WorldObjectAsset, type WorldObjectPhysics } from '../../types/world'
 import { useAudioStore } from '../../store/audio'
 import { useSceneObjectVisual } from './useSceneObjectVisual'
+import { OBJECT_SCALE } from './placements'
 
-export const OBJECT_SCALE = 0.5
 const OBJECT_AUTO_ROTATE_Y_SPEED = 0.35
 
 const COLLIDER_WIREFRAME_COLOR = 0x00aaff

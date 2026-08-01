@@ -4,6 +4,11 @@ const GRID_CELL_SIZE = 1
 const GRID_MAX_COLUMNS = 3
 export const OBJECT_RESET_ORIGIN: [number, number, number] = [0, 0, -2]
 
+// Every object mesh is rendered at this factor before its per-instance scale.
+// The generation pipeline divides measured metric sizes by it, so viewer and
+// pipeline must agree -- keep it here, where neither pulls in the other's deps.
+export const OBJECT_SCALE = 0.5
+
 export function gridPosition(index: number, total: number): [number, number, number] {
   const columns = Math.min(GRID_MAX_COLUMNS, Math.max(1, total))
   const column = index % columns

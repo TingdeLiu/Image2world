@@ -76,7 +76,7 @@ graph TD
 
 ### 阶段二：本地开源 AI 推理节点部署 (Weeks 3-4)
 - [x] **初始化 AI 推理微服务框架**：搭建了 Python FastAPI + Uvicorn 架构的 `backend/server.py`，设计了延迟加载与 VRAM 清理机制以适配 5060 Ti 16GB 显存。
-- [x] **图像预处理与 Clean Plate**：已实现 `/api/segment`（SAM 2 自动掩码 + base64 PNG 序列化）、`/api/crop`（Pillow 透明裁剪）与 `/api/inpaint`（Simple-LaMa 顺序背景修补），完成自动抠图与背景擦除。
+- [x] **图像预处理与 Clean Plate**：已实现 `/api/segment`（SAM 2 自动掩码 + base64 PNG 序列化）、`/api/crop`（Pillow 透明裁剪）与 `/api/inpaint`（Simple-LaMa 单次擦除所有掩码并集），完成自动抠图与背景擦除。
 - [x] **3D 物体生成（TripoSR 优化）**：已部署 `/api/image-to-3d`（TripoSR + 背景去除/前景缩放），输出 GLB 网格；E2E 世界已验证生成真实模型。
 - [x] **SFX 发生微服务**：已部署 `/api/generate-sfx` 碰撞/Foley 音效接口（当前采用 **AudioLDM-S**，非 Stable Audio Open；模型可后续替换）。
 - [x] **测试与联调**：`backend/test_client.py` / `test_pipeline.js` 已就绪；2026-06-13 完成冒烟验证——后端健康检查 + CUDA + SAM2 实时分割（home 图检出 13 物体），前端全部路由 200、生成世界渲染、GLB 资产正常服务。
@@ -85,6 +85,16 @@ graph TD
 
 - [x] **真实单图背景重建**：clean plate 已接入 Apple SHARP `/api/image-to-splat`，为每个世界生成独立 `.ply` 高斯溅射；仅在 SHARP 不可用时降级到 `home-room` 静态背景。
 
+#### ⚠️ 2026-08-01 方向调整：放弃前景物体实例，管线收敛为纯场景重建
+
+上述 SAM / TripoSR / AudioLDM / LaMa 前景链路**已从生成管线中移除**（后端端点保留，延迟加载不占显存）。理由：TripoSR 从单图猜测的几何与原物差距过大，且 SAM 自动分割选中的「最大 5 个区域」多为墙面、地板与门窗，而非可交互道具。
+
+更重要的是，擦除前景对**场景本身**是净损失——它把照片里真实的家具几何抹掉，再用猜测填回。现在源图原样送入 SHARP，家具作为真实几何被重建进世界。
+
+产品定位随之明确：**核心是一个可漫游的三维情景，而非情景里可以踢动的家具**。
+
+效果：端到端耗时 数分钟 → **43 秒**，参与推理的模型仅剩 SHARP。详见 PROJECT_REPORT §3.7。
+
 ### 阶段三：全栈 SaaS 系统开发 (Weeks 5-6)
 - [ ] **用户与权限**：集成 Clerk 登录，开发管理控制台。
 - [ ] **点数与计费**：设计点数消费表，集成 Stripe/Paypal，支持包月订阅和充值。
@@ -92,8 +102,10 @@ graph TD
 - [ ] **推理队列系统**：实现后端收到生成请求 -> 插入 Redis 队列 -> AI 推理 worker 消费 -> 任务状态更新并写入 R2 和数据库 -> 实时 Webhook/SSE 通知前端。
 
 ### 阶段四：管线打通与精细化打磨 (Weeks 7-8)
-- [x] **前后端全流程联调**：用户上传图片 -> SAM 2 / SAM 3 分割 -> 生成 SHARP Splat、3D Object、SFX -> 加载进 3D Viewer -> 自由漫游和编辑。
-- [ ] **加载与性能优化**：对高斯溅射 `.spz` 文件和 GLB 模型进行压缩（LOD、Draco 压缩），首屏加载实现渐进式显示。
+- [x] **前后端全流程联调**：用户上传图片 -> SHARP 重建场景 Splat -> 提取碰撞体与地面标定 -> 加载进 3D Viewer -> 自由漫游和编辑。
+- [ ] **加载与性能优化**：把 `.ply` 转为 **SPZ**（Spark 原生支持，体积约降一个数量级），首屏加载实现渐进式显示。当前单个世界 105 MB，其中 full_res PLY 占 64 MB。
+- [ ] **碰撞与漫游手感**：改善 collider 质量（补洞、去噪），优化行走碰撞响应与相机手感。
+- [ ] **扩大可行走范围**：SHARP 为单视角重建，只有相机可见表面存在几何，走到视野边缘即穿出。候选方案：世界模型（**Matrix-3D**，MIT 许可、5B low-VRAM 约 12 GB、输出 `.ply` 直接兼容；**HunyuanWorld-1.0-lite** 需 18 GB 超出本机，且许可排除欧盟/英国/韩国并设 100 万 MAU 上限）、或图像外扩后重建。
 - [ ] **移动端适配**：优化手机端陀螺仪和触控操作，提升分享体验。
 
 #### 2026-07-31 交付加固

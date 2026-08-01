@@ -393,29 +393,49 @@ async def segment_point(
 @app.post("/api/inpaint")
 async def inpaint_image(
     image: UploadFile = File(...),
-    mask: UploadFile = File(...)
+    masks: list[UploadFile] = File(...),
 ):
     """
     Remove segmented foreground objects and fill background using LaMa.
     Returns the cleaned background image (Clean Plate).
+
+    All masks are erased in a single pass over their union. Erasing them one at
+    a time instead re-ran LaMa on its own output, so each pass hallucinated on
+    top of the previous hallucination.
     """
     try:
         img_bytes = await image.read()
-        mask_bytes = await mask.read()
-
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        pil_mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
+
+        union = None
+        for mask_file in masks:
+            mask_np = np.array(
+                Image.open(io.BytesIO(await mask_file.read())).convert("L").resize(pil_img.size, Image.NEAREST)
+            )
+            union = mask_np if union is None else np.maximum(union, mask_np)
+        if union is None:
+            raise HTTPException(status_code=400, detail="No masks provided")
+
+        pil_mask = Image.fromarray((union > 127).astype(np.uint8) * 255, mode="L")
 
         lama = get_lama()
-        print("Running LaMa inpainting...")
+        print(f"Running LaMa inpainting over the union of {len(masks)} mask(s)...")
         result_img = lama(pil_img, pil_mask)
 
-        # Return inpainted image as PNG stream
+        # LaMa pads the input up to a multiple of 8 and returns the padded
+        # canvas. Downstream every mask, the splat's intrinsics and the object
+        # placements are expressed in source-image pixels, so hand back exactly
+        # the size we were given.
+        if result_img.size != pil_img.size:
+            result_img = result_img.crop((0, 0, pil_img.size[0], pil_img.size[1]))
+
         img_io = io.BytesIO()
         result_img.save(img_io, "PNG")
         img_io.seek(0)
         return StreamingResponse(img_io, media_type="image/png")
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Inpainting failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -507,13 +527,38 @@ async def image_to_3d(file: UploadFile = File(...)):
         print("Converting scene codes to 3D mesh...")
         meshes = tsr_model.extract_mesh(scene_codes, True, resolution=256)
         
+        mesh = meshes[0]
+
+        # TripoSR emits X-up meshes (verified by matching mesh silhouettes back
+        # to the source crops: the front view is the Y/X plane at IoU 0.62-0.95,
+        # against 0.12-0.52 for every other axis pair). glTF and three.js are
+        # Y-up, so without this every prop lies on its side -- and the viewer
+        # derives an object's footprint from its bounding box, so a toppled mesh
+        # also sinks into the floor. Rotating here keeps the fix in one place
+        # instead of making every consumer compensate.
+        # 90 deg about Z: (1,0,0) -> (0,1,0), so the mesh's up axis becomes Y.
+        mesh.apply_transform(np.array([
+            [0.0, -1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]))
+
         # Save mesh to memory as GLB bytes
         glb_io = io.BytesIO()
-        meshes[0].export(glb_io, file_type="glb")
+        mesh.export(glb_io, file_type="glb")
         glb_io.seek(0)
 
-        print("TripoSR generation complete.")
-        return Response(content=glb_io.read(), media_type="model/gltf-binary")
+        # TripoSR normalises every object into roughly a unit cube, so the raw
+        # mesh says nothing about real size. The caller pairs these extents with
+        # the metric size measured from the splat to derive a placement scale.
+        extents = mesh.bounds[1] - mesh.bounds[0]
+        print(f"TripoSR generation complete (mesh extents {extents.round(3).tolist()}).")
+        return Response(
+            content=glb_io.read(),
+            media_type="model/gltf-binary",
+            headers={"X-Mesh-Extents": ",".join(f"{float(v):.6f}" for v in extents)},
+        )
 
     except Exception as e:
         print(f"3D generation failed: {e}")
@@ -659,6 +704,196 @@ async def image_to_splat(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         clear_vram()
+
+def _read_splat_ply_with_camera(data: bytes):
+    """Read gaussian centres, opacity and the camera SHARP reconstructed with.
+
+    SHARP writes its intrinsics and the source resolution into the PLY as extra
+    elements, which is what lets us project gaussians back onto image pixels.
+    """
+    ply_scalar = {
+        "float": "<f4", "float32": "<f4", "double": "<f8", "float64": "<f8",
+        "char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1",
+        "short": "<i2", "int16": "<i2", "ushort": "<u2", "uint16": "<u2",
+        "int": "<i4", "int32": "<i4", "uint": "<u4", "uint32": "<u4",
+    }
+
+    end = data.find(b"end_header")
+    if end < 0:
+        raise ValueError("not a PLY file (no end_header)")
+    end = data.find(b"\n", end) + 1
+    header = data[:end].decode("ascii", errors="replace")
+    if "format binary_little_endian" not in header:
+        raise ValueError("only binary_little_endian PLY is supported")
+
+    elements = []
+    for line in (l.strip() for l in header.splitlines()):
+        if line.startswith("element"):
+            _, name, count = line.split()
+            elements.append((name, int(count), []))
+        elif line.startswith("property") and elements:
+            parts = line.split()
+            if parts[1] == "list":
+                raise ValueError("list properties are not supported")
+            elements[-1][2].append((parts[2], ply_scalar[parts[1]]))
+
+    parsed = {}
+    offset = end
+    for name, count, props in elements:
+        dtype = np.dtype([(p, d) for p, d in props])
+        parsed[name] = np.frombuffer(data, dtype=dtype, count=count, offset=offset)
+        offset += count * dtype.itemsize
+
+    vertex = parsed.get("vertex")
+    if vertex is None:
+        raise ValueError("PLY has no vertex element")
+    xyz = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1).astype(np.float64)
+    opacity = vertex["opacity"].astype(np.float64) if "opacity" in vertex.dtype.names else None
+
+    if "intrinsic" not in parsed or "image_size" not in parsed:
+        raise ValueError("PLY has no camera intrinsics; was it produced by SHARP?")
+    K = np.asarray(parsed["intrinsic"]["intrinsic"], dtype=np.float64).reshape(3, 3)
+    width, height = (int(v) for v in parsed["image_size"]["image_size"])
+    return xyz, opacity, K, width, height
+
+
+PLACEMENT_MAX_DISTANCE = 15.0     # ignore anything seen through a window
+PLACEMENT_OPACITY_THRESHOLD = 0.35
+PLACEMENT_CONTACT_BAND = 0.12     # fraction of mask height treated as its base
+PLACEMENT_MIN_CONTACT_POINTS = 12
+
+
+def locate_objects(ply_bytes: bytes, mask_images: list):
+    """Locate each masked object in 3D using the splat's own camera.
+
+    Objects used to be lined up on an arbitrary row in front of the camera,
+    which threw away the one thing the source photo actually tells us: where
+    each object sits. SHARP embeds the camera it reconstructed with, so a
+    gaussian can be projected back to the pixel it came from. Reading the
+    gaussians under a mask's base therefore recovers the surface the object was
+    resting on, and the mask's pixel extent at that depth gives its metric size.
+
+    `mask_images` are PIL images in any resolution; they are resampled to the
+    splat's source resolution. Returns (placements, ground_plane_offset), where
+    each position is viewer-space but has no ground offset applied.
+    """
+    xyz, opacity, K, width, height = _read_splat_ply_with_camera(ply_bytes)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+
+    depth = xyz[:, 2]
+    usable = depth > 1e-6
+    u = np.full(len(xyz), -1.0)
+    v = np.full(len(xyz), -1.0)
+    u[usable] = fx * xyz[usable, 0] / depth[usable] + cx
+    v[usable] = fy * xyz[usable, 1] / depth[usable] + cy
+
+    usable &= (u >= 0) & (u < width) & (v >= 0) & (v < height) & (depth <= PLACEMENT_MAX_DISTANCE)
+    if opacity is not None:
+        usable &= (1.0 / (1.0 + np.exp(-opacity))) >= PLACEMENT_OPACITY_THRESHOLD
+    if usable.sum() < 1000:
+        raise ValueError("too few usable gaussians to locate objects")
+
+    ui = np.clip(u.astype(np.int32), 0, width - 1)
+    vi = np.clip(v.astype(np.int32), 0, height - 1)
+    idx = np.flatnonzero(usable)
+
+    # The floor is the dominant flat horizontal band low in the scene. In viewer
+    # space (SHARP's +Y points down) that is the strongest peak in the lower
+    # half of the height histogram.
+    viewer_y = -xyz[idx, 1]
+    histogram, edges = np.histogram(viewer_y, bins=80)
+    lower_half = histogram[: len(histogram) // 2]
+    floor_y = float(edges[int(np.argmax(lower_half))]) if lower_half.max() > 0 else float(viewer_y.min())
+    ground_plane_offset = -floor_y
+
+    results = []
+    for mask_img in mask_images:
+        if mask_img.size != (width, height):
+            mask_img = mask_img.resize((width, height), Image.NEAREST)
+        mask_bool = np.array(mask_img.convert("L")) > 127
+
+        ys, xs = np.where(mask_bool)
+        if xs.size == 0:
+            results.append({"located": False, "reason": "empty mask"})
+            continue
+
+        y_min, y_max = int(ys.min()), int(ys.max())
+        x_min, x_max = int(xs.min()), int(xs.max())
+
+        # The object's base: the bottom slice of its mask. On the clean plate
+        # the object is already erased there, so those gaussians describe the
+        # surface it was resting on -- the floor, or the desk it sat on.
+        band_top = y_max - max(3, int((y_max - y_min) * PLACEMENT_CONTACT_BAND))
+        contact = mask_bool.copy()
+        contact[:band_top] = False
+
+        hit = idx[contact[vi[idx], ui[idx]]]
+        if hit.size < PLACEMENT_MIN_CONTACT_POINTS:
+            # A thin or occluded base still gives a usable depth from the whole
+            # mask even when its contact strip alone does not.
+            hit = idx[mask_bool[vi[idx], ui[idx]]]
+        if hit.size < PLACEMENT_MIN_CONTACT_POINTS:
+            results.append({"located": False, "reason": "no gaussians under mask"})
+            continue
+
+        base = np.median(xyz[hit], axis=0)
+        base_depth = float(base[2])
+
+        # Pinhole: an object spanning n pixels at distance d covers
+        # n * d / f metres on the plane through its base.
+        width_m = float((x_max - x_min + 1) * base_depth / fx)
+        height_m = float((y_max - y_min + 1) * base_depth / fy)
+
+        results.append({
+            "located": True,
+            # Viewer space, rotated 180 deg about X (the manifest's flip_y), but
+            # WITHOUT the ground offset applied -- the caller adds whichever
+            # offset it settles on so the floor is defined in exactly one place.
+            "position": [float(base[0]), float(-base[1]), float(-base[2])],
+            # Depth is unobservable from one view; assume it matches width.
+            "size": [width_m, height_m, width_m],
+            "depth": base_depth,
+            "contact_points": int(hit.size),
+        })
+
+    return results, ground_plane_offset
+
+
+@app.post("/api/place-objects")
+async def place_objects(
+    file: UploadFile = File(...),
+    masks: str = Form(...),
+):
+    """
+    Locate segmented objects in 3D against the background splat.
+
+    `masks` is a JSON array of base64 PNG masks in source-image resolution.
+    Returns, per mask, the viewer-space `position` (the object's footprint,
+    with the floor already at y=0) and its measured `size` in metres. Entries
+    whose contact patch has too few gaussians report `located: false` so the
+    caller can fall back rather than place them somewhere wrong.
+    """
+    import json
+
+    try:
+        mask_entries = json.loads(masks)
+        if not isinstance(mask_entries, list):
+            raise ValueError("masks must be a JSON array")
+
+        mask_images = [
+            Image.open(io.BytesIO(base64.b64decode(entry.get("mask") if isinstance(entry, dict) else entry)))
+            for entry in mask_entries
+        ]
+        results, ground_plane_offset = locate_objects(await file.read(), mask_images)
+
+        located = sum(1 for r in results if r.get("located"))
+        print(f"Placed {located}/{len(results)} objects (ground offset {ground_plane_offset:.3f}).")
+        return {"placements": results, "ground_plane_offset": ground_plane_offset}
+
+    except Exception as e:
+        print(f"Object placement failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/splat-to-collider")
 async def splat_to_collider(

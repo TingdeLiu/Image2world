@@ -14,9 +14,8 @@ import {
 import { useRouter } from 'next/navigation'
 import { AppButton } from './AppButton'
 
-type SelectedMask = { mask: string; thumb: string }
 type BackendStatus = 'checking' | 'ready' | 'offline'
-type GenerationStage = 'initializing' | 'segmenting' | 'objects' | 'inpainting' | 'splat' | 'finalizing'
+type GenerationStage = 'initializing' | 'splat' | 'finalizing'
 
 interface GenerationUiProgress {
   stage: GenerationStage
@@ -46,9 +45,6 @@ const INITIAL_GENERATION_PROGRESS: GenerationUiProgress = {
 }
 const GENERATION_STAGE_ORDER: GenerationStage[] = [
   'initializing',
-  'segmenting',
-  'objects',
-  'inpainting',
   'splat',
   'finalizing',
 ]
@@ -123,33 +119,6 @@ function friendlyFileName(file: File) {
     .join(' ')
 }
 
-// Crop a 64x64 preview of a clicked object's bounding box from the source file.
-async function cropThumb(file: File, bbox: number[]): Promise<string> {
-  const [bx, by, bw, bh] = bbox
-  const url = URL.createObjectURL(file)
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const im = new Image()
-      im.onload = () => resolve(im)
-      im.onerror = reject
-      im.src = url
-    })
-    const size = 64
-    const canvas = document.createElement('canvas')
-    canvas.width = size
-    canvas.height = size
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return url
-    const scale = Math.min(size / bw, size / bh)
-    const dw = bw * scale
-    const dh = bh * scale
-    ctx.drawImage(img, bx, by, bw, bh, (size - dw) / 2, (size - dh) / 2, dw, dh)
-    return canvas.toDataURL('image/png')
-  } finally {
-    URL.revokeObjectURL(url)
-  }
-}
-
 interface Props {
   open: boolean
   /** Called once the modal is allowed to close; generation in flight blocks it. */
@@ -159,38 +128,28 @@ interface Props {
 export function CreateWorldModal({ open, onClose }: Props) {
   const router = useRouter()
   const [worldName, setWorldName] = useState('')
-  const [concepts, setConcepts] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [selectedMasks, setSelectedMasks] = useState<SelectedMask[]>([])
-  const [pointBusy, setPointBusy] = useState(false)
-  const imgRef = useRef<HTMLImageElement>(null)
   const [dragActive, setDragActive] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [generationProgress, setGenerationProgress] = useState<GenerationUiProgress>(INITIAL_GENERATION_PROGRESS)
   const [generationError, setGenerationError] = useState('')
   const [fileError, setFileError] = useState('')
-  const [pointError, setPointError] = useState('')
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking')
   const [backendMessage, setBackendMessage] = useState('')
   const [selectedFileUrl, setSelectedFileUrl] = useState('')
   const generationAbortRef = useRef<AbortController | null>(null)
-  const pointAbortRef = useRef<AbortController | null>(null)
   const modalTitleId = useId()
 
   const resetCreateForm = useCallback(() => {
     setSelectedFile(null)
     setWorldName('')
-    setConcepts('')
-    setSelectedMasks([])
     setGenerationError('')
     setGenerationProgress(INITIAL_GENERATION_PROGRESS)
     setFileError('')
-    setPointError('')
   }, [])
 
   const closeCreateModal = useCallback(() => {
     if (generating) return
-    pointAbortRef.current?.abort()
     onClose()
     resetCreateForm()
   }, [generating, onClose, resetCreateForm])
@@ -237,60 +196,18 @@ export function CreateWorldModal({ open, onClose }: Props) {
 
   useEffect(() => () => {
     generationAbortRef.current?.abort()
-    pointAbortRef.current?.abort()
   }, [])
 
   const chooseImageFile = (file: File) => {
-    pointAbortRef.current?.abort()
     const error = validateImage(file)
     setFileError(error)
     setGenerationError('')
-    setPointError('')
-    setSelectedMasks([])
     if (error) {
       setSelectedFile(null)
       return
     }
     setSelectedFile(file)
     if (!worldName) setWorldName(friendlyFileName(file))
-  }
-
-  // Click-to-segment: a click on the source image picks the object at that point.
-  const handleImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
-    if (!selectedFile || pointBusy || generating) return
-    const img = imgRef.current
-    if (!img || !img.naturalWidth) return
-    const rect = img.getBoundingClientRect()
-    const x = Math.round((e.clientX - rect.left) * (img.naturalWidth / rect.width))
-    const y = Math.round((e.clientY - rect.top) * (img.naturalHeight / rect.height))
-    setPointError('')
-    setPointBusy(true)
-    const pointController = new AbortController()
-    pointAbortRef.current = pointController
-    try {
-      const fd = new FormData()
-      fd.append('file', selectedFile)
-      fd.append('x', String(x))
-      fd.append('y', String(y))
-      const res = await fetch('/api/segment-point', {
-        method: 'POST',
-        body: fd,
-        signal: pointController.signal,
-      })
-      if (!res.ok) throw new Error(await responseErrorMessage(res))
-      const data = await res.json()
-      const thumb = await cropThumb(selectedFile, data.bbox)
-      setSelectedMasks((prev) => [...prev, { mask: data.mask, thumb }])
-    } catch (err) {
-      if (pointController.signal.aborted) return
-      console.error('Point segmentation failed:', err)
-      setPointError(err instanceof Error ? err.message : 'Could not segment that point.')
-    } finally {
-      if (pointAbortRef.current === pointController) {
-        pointAbortRef.current = null
-        setPointBusy(false)
-      }
-    }
   }
 
   const handleCreateWorld = async (e: React.FormEvent) => {
@@ -318,12 +235,6 @@ export function CreateWorldModal({ open, onClose }: Props) {
       const formData = new FormData()
       formData.append('file', selectedFile)
       formData.append('name', worldName)
-      // Guided selection priority: click-selected masks > typed concepts > auto.
-      if (selectedMasks.length > 0) {
-        formData.append('masks', JSON.stringify(selectedMasks.map((m) => ({ mask: m.mask }))))
-      } else if (concepts.trim()) {
-        formData.append('concepts', concepts.trim())
-      }
 
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -542,23 +453,6 @@ export function CreateWorldModal({ open, onClose }: Props) {
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="world-concepts" className="text-xs font-mono font-semibold text-white/60 uppercase tracking-wider">
-                Objects to Extract <span className="text-white/30 normal-case">(optional, SAM 3)</span>
-              </label>
-              <input
-                id="world-concepts"
-                type="text"
-                value={concepts}
-                onChange={(e) => setConcepts(e.target.value)}
-                placeholder="e.g. chair, monitor, lamp"
-                className="bg-zinc-900 border border-white/10 focus:border-white/30 rounded px-3 py-2 text-white placeholder-white/20 font-mono text-sm outline-none transition-colors"
-              />
-              <span className="text-[10px] font-mono text-white/40">
-                Comma-separated. Leave blank to auto-detect the largest objects.
-              </span>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
               <span className="text-xs font-mono font-semibold text-white/60 uppercase tracking-wider">
                 Source Image
               </span>
@@ -625,64 +519,6 @@ export function CreateWorldModal({ open, onClose }: Props) {
               </div>
               {fileError && <span className="text-[10px] font-mono text-red-300/80" role="alert">{fileError}</span>}
             </div>
-
-            {selectedFile && selectedFileUrl && (
-              <div className="flex flex-col gap-1.5">
-                <span className="text-xs font-mono font-semibold text-white/60 uppercase tracking-wider">
-                  Click Objects to Extract <span className="text-white/30 normal-case">(optional, SAM 2)</span>
-                </span>
-                <div className="relative h-64 rounded-lg overflow-hidden border border-white/10 bg-zinc-900">
-                  <NextImage
-                    ref={imgRef}
-                    src={selectedFileUrl}
-                    alt="Click to segment"
-                    fill
-                    sizes="(max-width: 480px) calc(100vw - 4rem), 400px"
-                    unoptimized
-                    onClick={handleImageClick}
-                    className={`object-contain ${pointBusy ? 'cursor-wait opacity-70' : 'cursor-crosshair'}`}
-                  />
-                  {pointBusy && (
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                      <Spinner size={28} className="animate-spin text-white" />
-                    </div>
-                  )}
-                </div>
-                {pointError && (
-                  <span className="text-[10px] font-mono leading-relaxed text-red-300/80" role="alert">
-                    {pointError}
-                  </span>
-                )}
-                {selectedMasks.length > 0 ? (
-                  <div className="flex flex-wrap gap-2 mt-1">
-                    {selectedMasks.map((m, i) => (
-                      <div key={i} className="relative w-14 h-14 rounded overflow-hidden border border-white/15 bg-zinc-800">
-                        <NextImage
-                          src={m.thumb}
-                          alt={`Object ${i + 1}`}
-                          fill
-                          sizes="56px"
-                          unoptimized
-                          className="object-cover"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setSelectedMasks((prev) => prev.filter((_, j) => j !== i))}
-                          className="absolute top-0 right-0 bg-black/70 hover:bg-red-600 text-white w-4 h-4 flex items-center justify-center"
-                          aria-label={`Remove selected object ${i + 1}`}
-                        >
-                          <X size={10} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <span className="text-[10px] font-mono text-white/40">
-                    Click objects in the image to hand-pick them. Overrides categories above.
-                  </span>
-                )}
-              </div>
-            )}
 
             <div className="flex justify-end gap-2 mt-2">
               <AppButton

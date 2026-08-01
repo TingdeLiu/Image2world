@@ -13,22 +13,18 @@
 ```mermaid
 graph TD
     A[用户在 Web 端上传单张 2D 图像] -->|1. FormData POST /api/generate| B[Next.js API 协调器]
-    B -->|2. 创建 public/worlds/slug 目录| C[初始化本地文件结构]
-    B -->|3. POST /api/segment| D[FastAPI 本地推理后端 SAM 2]
-    D -->|4. 返回物体 bbox 和 base64 PNG 掩码| B
-    B -->|5. 针对前 5 大物体并行/顺序处理| E[提取前景道具资产]
-    E -->|A. POST /api/crop| F[FastAPI Pillow 裁剪服务]
-    F -->|返回透明紧凑 PNG 裁剪图| B
-    E -->|B. POST /api/image-to-3d| G[FastAPI TripoSR 3D 网格生成]
-    G -->|返回 3D GLB 模型网格| B
-    E -->|C. POST /api/generate-sfx| H[FastAPI AudioLDM-S 音效合成]
-    H -->|返回碰撞音效 WAV 字节| B
-    B -->|6. 循环顺序调用 POST /api/inpaint| I[FastAPI LaMa 背景修补]
-    I -->|返回完全擦除了前景物体的干净背景图| B
-    B -->|7. 组装背景 Splat 资产| J[复制静态高斯溅射环境 & 碰撞网格]
-    B -->|8. 写入配置文件| K[生成 project.json & 刚体 physics scene.json]
-    K -->|9. 重定向页面并 Hard-Reload| L[进入 3D 渲染漫游页面]
+    B -->|2. 创建 public/worlds/.staging/slug 暂存目录| C[初始化本地文件结构]
+    B -->|3. 源图原样 POST /api/image-to-splat| D[FastAPI Apple SHARP 单图三维重建]
+    D -->|返回完整场景高斯溅射 PLY 含相机内参| B
+    B -->|4. 本地降采样| E[生成 500k / 150k / 100k 三档 LOD]
+    B -->|5. POST /api/splat-to-collider| F[体素占据 + Marching Cubes]
+    F -->|返回碰撞网格 GLB 与地面高度标定| B
+    B -->|6. 写入配置文件| G[project.json / 0-world.json / scene.json]
+    G -->|7. 原子发布到正式目录| H[public/worlds/slug]
+    H -->|8. 重定向页面| I[进入 3D 渲染漫游页面]
 ```
+
+> 家具等前景物体不再被单独抽取——它们作为真实几何被重建进场景本身。放弃前景道具路线的理由见 §3.7。
 
 ---
 
@@ -173,6 +169,48 @@ npm run dev
 - **安装踩坑记录**（已写入 README Step 7）：① `pip install -e . --no-deps` 保护 numpy 2.x/torch；② 补 `timm/ftfy/regex/iopath/pycocotools`；③ Windows 需 `triton-windows`（EDT kernel 硬依赖 triton）；④ 权重**直连 hf.co**下载，**勿用 hf-mirror 镜像**（不服务 gated 仓库，报 `LocalEntryNotFoundError`）。
 - **代码侧已处理**：BPE 词表经 `sam3.__path__` 解析（规避 editable 安装 `__file__=None`）；推理包在 `torch.autocast(bfloat16)` + `inference_mode` 内（SAM 3 为 bf16，否则 dtype 不匹配）。
 
+## 3.7 🎯 管线收敛为「纯场景重建」（2026-08-01）
+
+### A. 为什么放弃前景物体实例
+
+此前管线的核心假设是「背景 Splat + 可交互前景道具」：用 SAM 分割物体 → LaMa 把它们从图里擦掉 → TripoSR 逐个重建成可挪动的 GLB → AudioLDM 配碰撞音效。
+
+实跑下来这条路不成立：
+
+- **几何与原物差距过大。** TripoSR 从单张裁剪图猜测三维形状，产出的是 marching-cubes 网格 + 顶点色，没有 UV 贴图。与照片里的实物相比，识别度很低。
+- **分割选中的往往不是道具。** SAM 2 自动分割取「面积最大的 5 个」，而画面里最大的区域是墙面、地板、门窗。实测 5 个「物体」中有一个高 2.48 m——房间层高才 2.6 m，那是一扇门。
+- **代价高昂。** TripoSR 与 AudioLDM 占据了生成时间的绝大部分。
+
+更关键的是**方向性的判断**：产品的价值在于「一个可漫游的三维情景」，而不是「情景里有几件能踢的家具」。
+
+### B. 擦除前景其实在损害场景质量
+
+一个反直觉但确凿的结论：既然目标是场景本身，那么 LaMa 擦除这一步是**净损失**——它把照片里真实的家具几何从场景中抹掉，再用 TripoSR 的猜测填回去。
+
+现在源图**原样**送入 SHARP，家具作为真实重建的几何留在世界里，视觉质量显著高于此前的「空房间 + 猜测道具」。
+
+### C. 结果
+
+生成管线收敛为：`源图 → SHARP 重建 → LOD 分档 → 碰撞体提取 → scene.json`。
+
+| | 改动前 | 改动后 |
+| :--- | :--- | :--- |
+| 端到端耗时（同一张图，RTX 5060 Ti） | 数分钟 | **43 秒** |
+| 参与推理的模型 | SAM 2 / TripoSR / AudioLDM / LaMa / SHARP | **仅 SHARP** |
+| 世界体积 | 119 MB | 105 MB |
+| 家具几何 | 被擦除后由 TripoSR 猜测 | 真实重建 |
+
+`scene.json` 的 `instances` 现在为空数组；摆放编辑器仍可手动从其他世界引入道具，这条路径未被破坏。
+
+后端 `server.py` 中 `/api/segment`、`/api/crop`、`/api/image-to-3d`、`/api/generate-sfx`、`/api/inpaint`、`/api/place-objects` 等端点**予以保留**——它们均为延迟加载，不被调用就不占显存，日后若重拾物体方向可直接复用。前端不再有任何调用方，`/api/segment-point` 路由已删除。
+
+### D. 过程中修正的既存缺陷
+
+这三项在排查过程中被发现，均已修复并保留在后端：
+
+- **TripoSR 输出 X-up 网格**，而 glTF/three.js 为 Y-up——此前所有道具在场景中其实是**躺倒**的，且 viewer 由包围盒推导落地面，躺倒的网格会连带陷进地板。判定方法：将网格沿各轴正交投影与裁剪图轮廓求 IoU，5 个物体一致指向 Y/X 平面（IoU 0.62–0.95，其余轴对仅 0.12–0.52）。已在导出前绕 Z 轴旋转 90° 修正。
+- **LaMa 的 pad 从未裁回。** LaMa 将输入补齐到 8 的倍数后返回整块画布，683 px 高的源图产出 688 px 的结果，导致串行修补时掩码错位、以及与 SHARP `image_size` 的 5 px 偏差。已裁回输入尺寸。
+- **串行修补改为单次并集修补。** 此前逐个物体调用 LaMa，每次都在上一次的生成结果上继续臆想。
 ---
 
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
