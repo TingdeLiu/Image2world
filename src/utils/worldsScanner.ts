@@ -574,18 +574,6 @@ export function sanitizePlacementProject(input: unknown): WorldSceneProject | un
       ? [spawnPoint[0] as number, spawnPoint[1] as number]
       : undefined
 
-  const worldBoundsRaw = record.worldBounds
-  const normalizedWorldBounds = (() => {
-    if (!worldBoundsRaw || typeof worldBoundsRaw !== 'object') return undefined
-    const candidate = worldBoundsRaw as Record<string, unknown>
-    const min = candidate.min
-    const max = candidate.max
-    if (!isVec3(min) || !isVec3(max)) return undefined
-    // A degenerate box would fence the player into nothing.
-    if (max.some((value, axis) => value <= min[axis])) return undefined
-    return { min, max }
-  })()
-
   return {
     version: PROJECT_VERSION,
     instances,
@@ -596,7 +584,6 @@ export function sanitizePlacementProject(input: unknown): WorldSceneProject | un
     ...(normalizedShadowCatcherOpacity !== undefined ? { shadowCatcherOpacity: normalizedShadowCatcherOpacity } : {}),
     ...(normalizedShadowCatcherColor !== undefined ? { shadowCatcherColor: normalizedShadowCatcherColor } : {}),
     ...(normalizedSpawnPoint ? { spawnPoint: normalizedSpawnPoint } : {}),
-    ...(normalizedWorldBounds ? { worldBounds: normalizedWorldBounds } : {}),
   }
 }
 

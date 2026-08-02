@@ -12,7 +12,6 @@ import { SplatRenderer } from '../modules/splat/SplatRenderer'
 import { EnvironmentMap } from '../modules/environment/EnvironmentMap'
 import { WorldCollider } from '../modules/collider/WorldCollider'
 import { GroundPlane } from '../modules/collider/GroundPlane'
-import { SceneBoundary } from '../modules/collider/SceneBoundary'
 import { CharacterController, type CharacterControllerHandle } from '../modules/character/CharacterController'
 import { FlyController, type FlyControllerHandle } from '../modules/character/FlyController'
 import { ObjectGrid } from '../modules/scene/ObjectGrid'
@@ -326,7 +325,6 @@ export function WorldViewer({
             <GroundPlane
               groundColliderEnabled={activeGroundPlaneColliderEnabled}
             />
-            <SceneBoundary bounds={sceneProject?.worldBounds} />
           </Physics>
           {splatUrl && (
             <OptionalAssetBoundary label={splatUrl} resetKey={splatUrl}>
