@@ -11,7 +11,8 @@
     "assets:lod": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/generate-ply-lods.mts",
     "export:usd": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/usd-export/run.mts",
     "test:usd": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/usd-export/run.mts --pytest",
-    "check": "npm run lint && npm run typecheck && npm run build"
+    "test": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --disable-warning=ExperimentalWarning --test \"src/**/*.test.ts\"",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
