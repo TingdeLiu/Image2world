@@ -89,6 +89,15 @@ export interface WorldSceneProject {
    * which fall back to the origin.
    */
   spawnPoint?: [number, number]
+  /**
+   * Extent of the reconstructed geometry in viewer space. The viewer fences
+   * this off so the player cannot walk out of the captured region into empty
+   * space. Absent on older worlds, which get no fence.
+   */
+  worldBounds?: {
+    min: [number, number, number]
+    max: [number, number, number]
+  }
 }
 
 export interface WorldVersion {

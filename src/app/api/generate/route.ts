@@ -405,6 +405,17 @@ async function runGeneration(
       groundPlaneOffset,
       groundPlaneColliderEnabled: true,
       ...(spawn ? { spawnPoint: [spawn.x, spawn.z] as [number, number] } : {}),
+      // Lets the viewer fence off the reconstructed area. Single-view capture
+      // only covers surfaces the camera saw, so without a fence you can walk
+      // out the unreconstructed side of a wall into empty space.
+      ...(collider?.boundsViewer
+        ? {
+            worldBounds: {
+              min: collider.boundsViewer.min as [number, number, number],
+              max: collider.boundsViewer.max as [number, number, number],
+            },
+          }
+        : {}),
     }
     fs.writeFileSync(path.join(worldDir, 'scene.json'), JSON.stringify(sceneJson, null, 2))
 
