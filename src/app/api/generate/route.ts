@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
 import { createBinaryPlyLod } from '../../../utils/plyLod'
+import { MarbleError, generateWorldWithMarble } from './marble'
 
 export const dynamic = 'force-dynamic'
-// SHARP reconstruction plus collider extraction is the whole pipeline now, but
-// both are heavy GPU passes on a large point cloud.
-export const maxDuration = 300
+// The local SHARP path finishes in well under a minute, but a Marble generation
+// routinely runs eight minutes or more.
+export const maxDuration = 900
 
 const AI_BACKEND_URL = (process.env.IMAGEWORLD_BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '')
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -164,6 +165,12 @@ export async function GET() {
 interface GenerationInput {
   file: File
   name: string
+  /**
+   * The user's own World Labs key. Present means "reconstruct with Marble",
+   * absent means "use the local SHARP backend". It is never written to disk or
+   * logged -- it lives in the caller's browser and only passes through here.
+   */
+  marbleApiKey?: string
 }
 
 /**
@@ -266,15 +273,21 @@ async function publishWorldDir(stagedDir: string, finalDir: string) {
 /**
  * Reconstruct a navigable world from one photo.
  *
- * The source image goes to SHARP as-is. An earlier version segmented the
- * foreground out, erased it with LaMa and rebuilt each object as a separate
- * TripoSR mesh -- but that threw away the room's real furniture geometry and
- * replaced it with a single-view guess, while costing most of the runtime. The
- * furniture in the photo is part of the world, so it is reconstructed as part
- * of the world.
+ * Two backends, chosen by whether the caller supplied a Marble key:
+ *
+ * - **Marble** (generative world model) invents what the camera never saw, so
+ *   the room comes back sealed on every side. Costs money and takes minutes.
+ * - **SHARP** (local, single-view) is free and finishes in seconds, but only
+ *   reconstructs surfaces the camera actually saw -- measured on a real room,
+ *   a third of the directions behind the viewer had no geometry at all.
+ *
+ * Either way the source image goes in untouched. An earlier version segmented
+ * the foreground out, erased it with LaMa and rebuilt each object as a separate
+ * TripoSR mesh -- that threw away the room's real furniture geometry and
+ * replaced it with a single-view guess, while costing most of the runtime.
  */
 async function runGeneration(
-  { file, name }: GenerationInput,
+  { file, name, marbleApiKey }: GenerationInput,
   report: ProgressReporter,
   signal: AbortSignal,
 ) {
@@ -313,9 +326,54 @@ async function runGeneration(
       display_name: name,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      notes: 'Generated with the local ImageWorld pipeline',
+      notes: marbleApiKey
+        ? 'Generated with World Labs Marble (marble-1.1)'
+        : 'Generated with the local ImageWorld pipeline (Apple SHARP)',
     }
     fs.writeFileSync(path.join(worldDir, 'project.json'), JSON.stringify(projectJson, null, 2))
+
+    // 2b. Marble path: it returns a finished world, so the local reconstruction,
+    // LOD and collider steps below are all skipped.
+    if (marbleApiKey) {
+      console.log('[Pipeline] Reconstructing world via World Labs Marble...')
+      const semantics = await generateWorldWithMarble({
+        apiKey: marbleApiKey,
+        imageBuffer,
+        displayName: name,
+        slug,
+        worldOutDir,
+        report: (progress, message, detail) => report({ stage: 'splat', progress, message, detail }),
+        signal,
+      })
+
+      const ambienceDir = path.join(process.cwd(), 'public', 'assets', 'ambience')
+      if (fs.existsSync(ambienceDir)) {
+        copyRecursiveSync(ambienceDir, path.join(worldDir, 'output', 'sfx'))
+      }
+
+      report({
+        stage: 'finalizing',
+        progress: 96,
+        message: 'Finalizing world configuration',
+        detail: 'Writing the scene descriptor',
+      })
+      // Marble centres the world on the viewpoint, which sits inside the space
+      // it generates -- so unlike SHARP, the origin needs no correction.
+      const marbleScene = {
+        version: 1,
+        instances: [],
+        sun: { intensity: 1, rotation: [0, 0, 0], environmentIntensity: 1 },
+        metricScaleFactor: semantics.metricScaleFactor,
+        groundPlaneOffset: semantics.groundPlaneOffset,
+        groundPlaneColliderEnabled: true,
+      }
+      fs.writeFileSync(path.join(worldDir, 'scene.json'), JSON.stringify(marbleScene, null, 2))
+
+      await publishWorldDir(worldDir, finalWorldDir)
+      stagedWorldDir = undefined
+      console.log(`[Pipeline] Marble generation complete for slug: ${slug}`)
+      return { slug }
+    }
 
     // 3. Reconstruct the world as a 3D gaussian splat (Apple SHARP).
     report({
@@ -448,6 +506,8 @@ export async function POST(request: NextRequest) {
   const fileValue = formData.get('file')
   const file = fileValue instanceof File ? fileValue : null
   const name = (formData.get('name') as string | null)?.trim() || ''
+  // Supplied per-request from the user's browser; never stored server-side.
+  const marbleApiKey = (formData.get('marbleApiKey') as string | null)?.trim() || undefined
 
   if (!file || !name) {
     return generationErrorResponse('Missing image file or world name.', 400)
@@ -481,7 +541,7 @@ export async function POST(request: NextRequest) {
       }
 
       void runGeneration(
-        { file, name },
+        { file, name, marbleApiKey },
         (progress) => send({ type: 'progress', ...progress }),
         generationController.signal,
       )
@@ -490,19 +550,24 @@ export async function POST(request: NextRequest) {
         })
         .catch((error: unknown) => {
           const pipelineError = error instanceof GenerationPipelineError ? error : undefined
+          const marbleError = error instanceof MarbleError ? error : undefined
           const canceled = error instanceof GenerationCanceledError
             || (error instanceof DOMException && error.name === 'AbortError')
           send({
             type: 'error',
             error: {
-              code: canceled ? 'generation_canceled' : pipelineError?.code || 'generation_failed',
+              code: canceled
+                ? 'generation_canceled'
+                : marbleError
+                  ? 'marble_error'
+                  : pipelineError?.code || 'generation_failed',
               message: canceled
                 ? 'Generation canceled. No world was published.'
                 : error instanceof Error
                   ? error.message
                   : 'Generation failed.',
-              stage: pipelineError?.stage || 'finalizing',
-              retryable: canceled || pipelineError?.retryable !== false,
+              stage: pipelineError?.stage || 'splat',
+              retryable: canceled || (marbleError?.retryable ?? pipelineError?.retryable !== false),
             },
           })
         })

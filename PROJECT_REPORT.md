@@ -316,6 +316,39 @@ Marble 返回的 JSON 结构与本项目 `output/world/0-world.json` 的 `WorldM
 
 ---
 
+## 3.11 🔑 双管线与用户自带 Key（BYOK，2026-08-02）
+
+### A. 设计
+
+生成弹窗新增一个**可选**的 Marble API Key 输入框，旁附 [platform.worldlabs.ai/api-keys](https://platform.worldlabs.ai/api-keys) 获取入口。管线据此自动选择：
+
+| | 未填 Key | 填了 Key |
+| :--- | :--- | :--- |
+| 后端 | 本地 Apple SHARP | World Labs Marble |
+| 成本 | 免费（本地 GPU） | 约 1500 credits ≈ $1.20，**计入用户自己的账户** |
+| 耗时 | 16–43 秒 | 约 8 分钟 |
+| 空间 | 只重建相机所见，**背后敞开** | **四周完全封闭** |
+| 是否需要本地 GPU 后端 | 是 | **否**（纯云端） |
+
+商业含义：**产品不承担 API 成本**。用户想要更好的效果就自带 key，否则用本地免费管线——无门槛先试用，满意再升级。
+
+### B. Key 的安全处理
+
+- 存于浏览器 `localStorage`，**服务端不落盘**
+- 随每次生成请求传递，**仅置于 `WLT-Api-Key` 请求头**，绝不出现在 URL 中
+- **不写入任何日志**（已通过代码审计核对）
+- 输入框为 `type="password"`，`autoComplete="off"`
+
+### C. 验证
+
+- **无效 Key**：`{"code":"marble_error","message":"Marble rejected the API key. Check it on platform.worldlabs.ai.","retryable":false}` —— 401 被翻译为可读提示，且标记为不可重试（换 key 才有意义）。失败后暂存目录已清理，未产生费用。
+- **未填 Key**：本地 SHARP 路径 16 秒完成，无回归。
+- Marble 路径的产物落盘规则与既有扫描器一致，因此**前端零改动**即可渲染（详见 §3.10-B）。
+
+> `maxDuration` 由 300 秒提升至 900 秒——Marble 单次生成常需 8 分钟以上。
+
+---
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：

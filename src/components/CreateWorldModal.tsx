@@ -119,6 +119,29 @@ function friendlyFileName(file: File) {
     .join(' ')
 }
 
+// The key is the user's own and stays on their machine: it is kept in
+// localStorage and attached per request, never persisted server-side.
+const MARBLE_KEY_STORAGE = 'imageworld:marble-api-key'
+const MARBLE_KEYS_URL = 'https://platform.worldlabs.ai/api-keys'
+
+function readStoredMarbleKey() {
+  if (typeof window === 'undefined') return ''
+  try {
+    return window.localStorage.getItem(MARBLE_KEY_STORAGE) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function storeMarbleKey(key: string) {
+  try {
+    if (key) window.localStorage.setItem(MARBLE_KEY_STORAGE, key)
+    else window.localStorage.removeItem(MARBLE_KEY_STORAGE)
+  } catch {
+    // Private browsing or a blocked origin -- the key simply won't persist.
+  }
+}
+
 interface Props {
   open: boolean
   /** Called once the modal is allowed to close; generation in flight blocks it. */
@@ -128,6 +151,7 @@ interface Props {
 export function CreateWorldModal({ open, onClose }: Props) {
   const router = useRouter()
   const [worldName, setWorldName] = useState('')
+  const [marbleKey, setMarbleKey] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -140,6 +164,8 @@ export function CreateWorldModal({ open, onClose }: Props) {
   const generationAbortRef = useRef<AbortController | null>(null)
   const modalTitleId = useId()
 
+  // The key is deliberately left out of the reset: it is a setting, not part of
+  // the form the user refills for each world.
   const resetCreateForm = useCallback(() => {
     setSelectedFile(null)
     setWorldName('')
@@ -147,6 +173,8 @@ export function CreateWorldModal({ open, onClose }: Props) {
     setGenerationProgress(INITIAL_GENERATION_PROGRESS)
     setFileError('')
   }, [])
+
+  const usingMarble = marbleKey.trim().length > 0
 
   const closeCreateModal = useCallback(() => {
     if (generating) return
@@ -186,6 +214,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return
     setGenerationError('')
+    setMarbleKey(readStoredMarbleKey())
     void checkBackend()
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeCreateModal()
@@ -215,18 +244,25 @@ export function CreateWorldModal({ open, onClose }: Props) {
     if (!selectedFile || !worldName.trim()) return
 
     setGenerationError('')
-    const backendReady = backendStatus === 'ready' || await checkBackend()
-    if (!backendReady) {
-      setGenerationError('Start the local AI backend, then retry the connection.')
-      return
+    // Marble runs entirely in the cloud, so the local GPU backend is only
+    // required when no key is supplied.
+    if (!usingMarble) {
+      const backendReady = backendStatus === 'ready' || await checkBackend()
+      if (!backendReady) {
+        setGenerationError('Start the local AI backend, or add a Marble API key to generate in the cloud.')
+        return
+      }
     }
 
+    storeMarbleKey(marbleKey.trim())
     setGenerating(true)
     setGenerationProgress({
       stage: 'initializing',
       progress: 1,
       message: 'Uploading source image',
-      detail: 'Opening a live connection to the generation pipeline',
+      detail: usingMarble
+        ? 'Sending the photo to World Labs Marble'
+        : 'Opening a live connection to the local pipeline',
     })
     const generationController = new AbortController()
     generationAbortRef.current = generationController
@@ -235,6 +271,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
       const formData = new FormData()
       formData.append('file', selectedFile)
       formData.append('name', worldName)
+      if (usingMarble) formData.append('marbleApiKey', marbleKey.trim())
 
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -397,34 +434,46 @@ export function CreateWorldModal({ open, onClose }: Props) {
           </div>
         ) : (
           <form onSubmit={handleCreateWorld} className="flex flex-col gap-4">
-            <div
-              className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${
-                backendStatus === 'ready'
-                  ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-200/80'
-                  : backendStatus === 'offline'
-                    ? 'border-amber-400/25 bg-amber-400/5 text-amber-100/80'
-                    : 'border-white/10 bg-white/[0.03] text-white/50'
-              }`}
-              role="status"
-            >
-              {backendStatus === 'ready' ? (
-                <CheckCircle size={16} className="mt-0.5 flex-shrink-0" weight="fill" />
-              ) : backendStatus === 'offline' ? (
-                <WarningCircle size={16} className="mt-0.5 flex-shrink-0" weight="fill" />
-              ) : (
-                <Spinner size={16} className="mt-0.5 flex-shrink-0 animate-spin" />
-              )}
-              <span className="min-w-0 flex-1">{backendMessage}</span>
-              {backendStatus === 'offline' && (
-                <button
-                  type="button"
-                  onClick={() => void checkBackend()}
-                  className="flex-shrink-0 rounded border border-current/20 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider hover:bg-white/5"
-                >
-                  Retry
-                </button>
-              )}
-            </div>
+            {usingMarble ? (
+              <div
+                className="flex items-start gap-2 rounded-lg border border-sky-400/25 bg-sky-400/5 px-3 py-2 text-xs leading-relaxed text-sky-100/80"
+                role="status"
+              >
+                <GlobeHemisphereWestIcon size={16} className="mt-0.5 flex-shrink-0" weight="fill" />
+                <span className="min-w-0 flex-1">
+                  Generating with World Labs Marble — a complete, enclosed world. Billed to your own key.
+                </span>
+              </div>
+            ) : (
+              <div
+                className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${
+                  backendStatus === 'ready'
+                    ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-200/80'
+                    : backendStatus === 'offline'
+                      ? 'border-amber-400/25 bg-amber-400/5 text-amber-100/80'
+                      : 'border-white/10 bg-white/[0.03] text-white/50'
+                }`}
+                role="status"
+              >
+                {backendStatus === 'ready' ? (
+                  <CheckCircle size={16} className="mt-0.5 flex-shrink-0" weight="fill" />
+                ) : backendStatus === 'offline' ? (
+                  <WarningCircle size={16} className="mt-0.5 flex-shrink-0" weight="fill" />
+                ) : (
+                  <Spinner size={16} className="mt-0.5 flex-shrink-0 animate-spin" />
+                )}
+                <span className="min-w-0 flex-1">{backendMessage}</span>
+                {backendStatus === 'offline' && (
+                  <button
+                    type="button"
+                    onClick={() => void checkBackend()}
+                    className="flex-shrink-0 rounded border border-current/20 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider hover:bg-white/5"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+            )}
 
             {generationError && (
               <div
@@ -450,6 +499,37 @@ export function CreateWorldModal({ open, onClose }: Props) {
                 placeholder="e.g. Dream Bedroom"
                 className="bg-zinc-900 border border-white/10 focus:border-white/30 rounded px-3 py-2 text-white placeholder-white/20 font-mono text-sm outline-none transition-colors"
               />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-baseline justify-between gap-2">
+                <label htmlFor="marble-key" className="text-xs font-mono font-semibold text-white/60 uppercase tracking-wider">
+                  Marble API Key <span className="text-white/30 normal-case">(optional)</span>
+                </label>
+                <a
+                  href={MARBLE_KEYS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-[10px] text-sky-300/70 underline decoration-dotted underline-offset-2 hover:text-sky-200"
+                >
+                  Get a key ↗
+                </a>
+              </div>
+              <input
+                id="marble-key"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={marbleKey}
+                onChange={(e) => setMarbleKey(e.target.value)}
+                placeholder="Leave empty to use the local GPU pipeline"
+                className="bg-zinc-900 border border-white/10 focus:border-white/30 rounded px-3 py-2 text-white placeholder-white/20 font-mono text-sm outline-none transition-colors"
+              />
+              <span className="text-[10px] font-mono leading-relaxed text-white/40">
+                {usingMarble
+                  ? 'Stored in this browser only. Marble builds a fully enclosed world you can walk around in — billed to your account (~1500 credits per world).'
+                  : 'Without a key, generation runs on your local GPU: free and fast, but only reconstructs what the camera saw, so the space is open behind you.'}
+              </span>
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -530,7 +610,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
               </AppButton>
               <AppButton
                 type="submit"
-                disabled={!selectedFile || !worldName.trim() || backendStatus !== 'ready'}
+                disabled={!selectedFile || !worldName.trim() || (!usingMarble && backendStatus !== 'ready')}
                 className="bg-white text-black font-semibold hover:bg-white/90 disabled:opacity-40 disabled:hover:bg-white rounded px-4 py-2 font-mono text-xs h-9 flex items-center justify-center"
               >
                 Generate World
