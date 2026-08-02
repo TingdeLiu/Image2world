@@ -219,29 +219,20 @@ async function buildBackgroundCollider(worldOutDir: string, signal: AbortSignal)
 }
 
 /**
- * Pick a spawn point inside the reconstructed room.
+ * SHARP worlds deliberately record no spawn point, leaving the viewer at its
+ * default near the origin -- which is where the photo was taken.
  *
- * SHARP reconstructs from where the photo was taken, which is typically outside
- * the space itself -- measured on a real room, the geometry started 2.1 m in
- * front of the default spawn, so the player began outside the world looking in,
- * with nothing but the 200 m ground plane behind them. Stand them just inside
- * the near edge instead, centred on the room's width.
+ * An earlier version placed the player 1.5 m inside the room, on the reasoning
+ * that starting outside the geometry was a bug. It reads better in the abstract
+ * and looks worse in practice: single-view reconstruction is sharpest at the
+ * capture pose and smears into streaks as you leave it, so walking inside trades
+ * the whole scene's clarity for immersion. Comparing two worlds with their spawn
+ * points equalised showed the "better looking" one differed only by where it put
+ * you, not by how it was built.
+ *
+ * Marble worlds do not face this trade: they generate the occluded geometry, so
+ * they stay sharp from anywhere and are fine at the same default origin.
  */
-function spawnInsideRoom(bounds?: { min: number[]; max: number[] }) {
-  if (!bounds || bounds.min.length !== 3 || bounds.max.length !== 3) return undefined
-  const [minX, , minZ] = bounds.min
-  const [maxX, , maxZ] = bounds.max
-  const depth = maxZ - minZ
-  if (!Number.isFinite(depth) || depth <= 0) return undefined
-
-  // Step in from the near (camera-facing) edge, but never past the midpoint of
-  // a shallow room.
-  const inset = Math.min(1.5, depth * 0.35)
-  return {
-    x: (minX + maxX) / 2,
-    z: maxZ - inset,
-  }
-}
 
 // Windows denies a directory rename while any process still holds a handle
 // inside it -- a virus scanner or the search indexer working through the
@@ -413,10 +404,6 @@ async function runGeneration(
     })
     const collider = await buildBackgroundCollider(worldOutDir, signal)
     const groundPlaneOffset = collider?.groundPlaneOffset ?? 0
-    const spawn = spawnInsideRoom(collider?.boundsViewer)
-    if (spawn) {
-      console.log(`[Pipeline] Spawn placed inside the room at x=${spawn.x.toFixed(2)}, z=${spawn.z.toFixed(2)}.`)
-    }
 
     // 6. Minimal world manifest so the scanner picks up the local .ply splat.
     const worldJson = {
@@ -462,7 +449,6 @@ async function runGeneration(
       // exporter, so it has to carry the calibrated value too.
       groundPlaneOffset,
       groundPlaneColliderEnabled: true,
-      ...(spawn ? { spawnPoint: [spawn.x, spawn.z] as [number, number] } : {}),
     }
     fs.writeFileSync(path.join(worldDir, 'scene.json'), JSON.stringify(sceneJson, null, 2))
 

@@ -89,7 +89,12 @@ export const useDebugStore = create<DebugStore>()(
       setShowOrigin: (showOrigin) => set({ showOrigin }),
       butterfliesEnabled: false,
       setButterfliesEnabled: (butterfliesEnabled) => set({ butterfliesEnabled }),
-      controllerMode: 'fly' as ControllerMode,
+      // Walking is the point of the product, so it is the default. Fly moves the
+      // camera directly with no rigid body, which means no gravity, no wall
+      // collisions and a dead jump key -- fine for inspecting a scene, but it
+      // reads as "you cannot walk here" on first load. The placement editor
+      // still forces fly mode, where free movement is what you want.
+      controllerMode: 'fps' as ControllerMode,
       setControllerMode: (controllerMode) => set({ controllerMode }),
       flyMouseSensitivity: 0.003,
       setFlyMouseSensitivity: (flyMouseSensitivity) => set({ flyMouseSensitivity }),
@@ -130,13 +135,18 @@ export const useDebugStore = create<DebugStore>()(
     }),
     {
       name: 'imageworld-debug',
-      version: 11,
+      version: 12,
       skipHydration: true,
       migrate: (persisted, version) => {
         if (!persisted || typeof persisted !== 'object') return persisted
         const state = persisted as Record<string, unknown>
         if (state.controllerMode === 'butterfly') state.controllerMode = 'fly'
         if (version < 10) state.butterfliesEnabled = true
+        // Existing installs have "fly" persisted from when it was the default,
+        // so they would keep loading into a world with no gravity or collisions
+        // however the default changes. Reset it once; anyone who actually wants
+        // fly only has to pick it again.
+        if (version < 12) state.controllerMode = 'fps'
         delete state.hotReloadEnabled
         return state
       },
