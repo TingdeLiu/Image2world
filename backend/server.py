@@ -5,6 +5,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "TripoSR"))
 
 import io
 import gc
+import asyncio
 import base64
 import torch
 if not hasattr(torch, "float8_e8m0fnu"):
@@ -64,6 +65,32 @@ def clear_vram():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
+
+
+# --- Concurrency -------------------------------------------------------------
+#
+# Every model here is a lazily-built global on a single GPU, so two requests
+# running at once would race for both the weights and the VRAM. They are also
+# synchronous: calling them straight from an `async def` handler blocks the
+# event loop, which starved even `GET /` for nine seconds during a SHARP run and
+# made the frontend's three-second health check report the backend as offline.
+#
+# `run_heavy` fixes both: the work moves to a worker thread so the loop stays
+# responsive, and the semaphore keeps heavy jobs strictly one at a time, so
+# concurrent callers queue instead of exhausting VRAM.
+
+HEAVY_JOB_LOCK = asyncio.Semaphore(1)
+
+
+async def run_heavy(fn, *args, **kwargs):
+    """Run one blocking GPU/compute job off the event loop, serialised."""
+    async with HEAVY_JOB_LOCK:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+async def run_off_loop(fn, *args, **kwargs):
+    """Run short blocking work off the event loop without taking the lock."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 # --- Segmentation backends (SAM 2 automatic + SAM 3 concept-promptable) -------
 
@@ -291,21 +318,21 @@ async def segment_image(
         h, w, _ = img_np.shape
 
         mode = (segmenter or os.environ.get("IMAGEWORLD_SEGMENTER") or "sam2").lower()
-        used = mode
+        concept_list = (
+            [c.strip() for c in concepts.split(",") if c.strip()]
+            if concepts else DEFAULT_INDOOR_CONCEPTS
+        )
 
-        if mode == "sam3":
-            if concepts:
-                concept_list = [c.strip() for c in concepts.split(",") if c.strip()]
-            else:
-                concept_list = DEFAULT_INDOOR_CONCEPTS
+        def work():
+            if mode != "sam3":
+                return _segment_sam2(img_np, h, w), "sam2"
             try:
-                results = _segment_sam3(pil_image, h, w, concept_list)
+                return _segment_sam3(pil_image, h, w, concept_list), "sam3"
             except Exception as exc:
                 print(f"SAM 3 unavailable ({exc}); falling back to SAM 2.")
-                results = _segment_sam2(img_np, h, w)
-                used = "sam2"
-        else:
-            results = _segment_sam2(img_np, h, w)
+                return _segment_sam2(img_np, h, w), "sam2"
+
+        results, used = await run_heavy(work)
 
         print(f"[{used}] generated {len(results)} object proposals.")
         return {"width": w, "height": h, "objects": results, "segmenter_used": used}
@@ -356,13 +383,16 @@ async def segment_point(
         img_np = np.array(pil_image)
         h, w, _ = img_np.shape
 
-        predictor = get_sam2_predictor()
-        predictor.set_image(img_np)
-        masks, scores, _ = predictor.predict(
-            point_coords=np.array([[float(x), float(y)]]),
-            point_labels=np.array([1]),
-            multimask_output=True,
-        )
+        def work():
+            predictor = get_sam2_predictor()
+            predictor.set_image(img_np)
+            return predictor.predict(
+                point_coords=np.array([[float(x), float(y)]]),
+                point_labels=np.array([1]),
+                multimask_output=True,
+            )
+
+        masks, scores, _ = await run_heavy(work)
         best = int(np.argmax(scores))
         mask_bool = masks[best].astype(bool)
 
@@ -418,16 +448,19 @@ async def inpaint_image(
 
         pil_mask = Image.fromarray((union > 127).astype(np.uint8) * 255, mode="L")
 
-        lama = get_lama()
         print(f"Running LaMa inpainting over the union of {len(masks)} mask(s)...")
-        result_img = lama(pil_img, pil_mask)
 
-        # LaMa pads the input up to a multiple of 8 and returns the padded
-        # canvas. Downstream every mask, the splat's intrinsics and the object
-        # placements are expressed in source-image pixels, so hand back exactly
-        # the size we were given.
-        if result_img.size != pil_img.size:
-            result_img = result_img.crop((0, 0, pil_img.size[0], pil_img.size[1]))
+        def work():
+            result = get_lama()(pil_img, pil_mask)
+            # LaMa pads the input up to a multiple of 8 and returns the padded
+            # canvas. Downstream every mask, the splat's intrinsics and the
+            # object placements are expressed in source-image pixels, so hand
+            # back exactly the size we were given.
+            if result.size != pil_img.size:
+                result = result.crop((0, 0, pil_img.size[0], pil_img.size[1]))
+            return result
+
+        result_img = await run_heavy(work)
 
         img_io = io.BytesIO()
         result_img.save(img_io, "PNG")
@@ -466,18 +499,18 @@ async def crop_image(
         y_min, y_max = int(np.min(pos[0])), int(np.max(pos[0]))
         x_min, x_max = int(np.min(pos[1])), int(np.max(pos[1]))
 
-        # Create RGBA image
-        rgba_img = pil_img.copy()
-        rgba_img.putalpha(pil_mask)
+        # Cheap enough that it need not queue behind a generation, but still
+        # worth keeping off the event loop.
+        def work():
+            rgba_img = pil_img.copy()
+            rgba_img.putalpha(pil_mask)
+            cropped = rgba_img.crop((x_min, y_min, x_max + 1, y_max + 1))
+            buf = io.BytesIO()
+            cropped.save(buf, "PNG")
+            buf.seek(0)
+            return buf
 
-        # Crop to bbox
-        cropped_img = rgba_img.crop((x_min, y_min, x_max + 1, y_max + 1))
-
-        # Return cropped image as PNG stream
-        img_io = io.BytesIO()
-        cropped_img.save(img_io, "PNG")
-        img_io.seek(0)
-        return StreamingResponse(img_io, media_type="image/png")
+        return StreamingResponse(await run_off_loop(work), media_type="image/png")
 
     except Exception as e:
         print(f"Cropping failed: {e}")
@@ -493,61 +526,63 @@ async def image_to_3d(file: UploadFile = File(...)):
         contents = await file.read()
         pil_image = Image.open(io.BytesIO(contents)).convert("RGBA")
 
-        # Lazy load TripoSR to save VRAM
-        if tsr_model is None:
-            print("Loading TripoSR model...")
-            from tsr.system import TSR
-            
-            # stabilityai/TripoSR will download automatically from Hugging Face Hub
-            tsr_model = TSR.from_pretrained(
-                "stabilityai/TripoSR",
-                config_name="config.yaml",
-                weight_name="model.ckpt"
-            )
-            tsr_model.to(DEVICE)
+        def work():
+            global tsr_model
+            # Lazy load TripoSR to save VRAM
+            if tsr_model is None:
+                print("Loading TripoSR model...")
+                from tsr.system import TSR
 
-        print("Running TripoSR 3D generation...")
-        from tsr.utils import remove_background, resize_foreground
+                # stabilityai/TripoSR downloads automatically from Hugging Face Hub
+                tsr_model = TSR.from_pretrained(
+                    "stabilityai/TripoSR",
+                    config_name="config.yaml",
+                    weight_name="model.ckpt"
+                )
+                tsr_model.to(DEVICE)
 
-        # Run background removal (if not already cropped) and resize object
-        # TripoSR works best with resized foreground
-        processed_image = remove_background(pil_image, threshold=0.85)
-        processed_image = resize_foreground(processed_image, ratio=0.85)
-        
-        # Convert RGBA to RGB by compositing over gray background (TripoSR convention)
-        img_np = np.array(processed_image).astype(np.float32) / 255.0
-        if img_np.shape[-1] == 4:
-            img_np = img_np[:, :, :3] * img_np[:, :, 3:4] + (1.0 - img_np[:, :, 3:4]) * 0.5
-        processed_image = Image.fromarray((img_np * 255.0).astype(np.uint8))
-        
-        with torch.no_grad():
-            scene_codes = tsr_model([processed_image], device=DEVICE)
-            
-        # Extract meshes and convert to GLB
-        print("Converting scene codes to 3D mesh...")
-        meshes = tsr_model.extract_mesh(scene_codes, True, resolution=256)
-        
-        mesh = meshes[0]
+            print("Running TripoSR 3D generation...")
+            from tsr.utils import remove_background, resize_foreground
 
-        # TripoSR emits X-up meshes (verified by matching mesh silhouettes back
-        # to the source crops: the front view is the Y/X plane at IoU 0.62-0.95,
-        # against 0.12-0.52 for every other axis pair). glTF and three.js are
-        # Y-up, so without this every prop lies on its side -- and the viewer
-        # derives an object's footprint from its bounding box, so a toppled mesh
-        # also sinks into the floor. Rotating here keeps the fix in one place
-        # instead of making every consumer compensate.
-        # 90 deg about Z: (1,0,0) -> (0,1,0), so the mesh's up axis becomes Y.
-        mesh.apply_transform(np.array([
-            [0.0, -1.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]))
+            # Run background removal (if not already cropped) and resize object
+            # TripoSR works best with resized foreground
+            processed_image = remove_background(pil_image, threshold=0.85)
+            processed_image = resize_foreground(processed_image, ratio=0.85)
 
-        # Save mesh to memory as GLB bytes
-        glb_io = io.BytesIO()
-        mesh.export(glb_io, file_type="glb")
-        glb_io.seek(0)
+            # Convert RGBA to RGB by compositing over gray (TripoSR convention)
+            img_np = np.array(processed_image).astype(np.float32) / 255.0
+            if img_np.shape[-1] == 4:
+                img_np = img_np[:, :, :3] * img_np[:, :, 3:4] + (1.0 - img_np[:, :, 3:4]) * 0.5
+            processed_image = Image.fromarray((img_np * 255.0).astype(np.uint8))
+
+            with torch.no_grad():
+                scene_codes = tsr_model([processed_image], device=DEVICE)
+
+            print("Converting scene codes to 3D mesh...")
+            mesh = tsr_model.extract_mesh(scene_codes, True, resolution=256)[0]
+
+            # TripoSR emits X-up meshes (verified by matching mesh silhouettes
+            # back to the source crops: the front view is the Y/X plane at IoU
+            # 0.62-0.95, against 0.12-0.52 for every other axis pair). glTF and
+            # three.js are Y-up, so without this every prop lies on its side --
+            # and the viewer derives an object's footprint from its bounding
+            # box, so a toppled mesh also sinks into the floor. Rotating here
+            # keeps the fix in one place instead of making every consumer
+            # compensate.
+            # 90 deg about Z: (1,0,0) -> (0,1,0), so the mesh's up axis becomes Y.
+            mesh.apply_transform(np.array([
+                [0.0, -1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]))
+
+            buf = io.BytesIO()
+            mesh.export(buf, file_type="glb")
+            buf.seek(0)
+            return mesh, buf
+
+        mesh, glb_io = await run_heavy(work)
 
         # TripoSR normalises every object into roughly a unit cube, so the raw
         # mesh says nothing about real size. The caller pairs these extents with
@@ -573,38 +608,38 @@ async def generate_sfx(prompt: str = Form(...), duration: float = Form(3.0)):
     """
     global sfx_pipeline
     try:
-        # Lazy load AudioLDM to save VRAM
-        if sfx_pipeline is None:
-            print("Loading AudioLDM pipeline...")
-            from diffusers import AudioLDMPipeline
-            
-            sfx_pipeline = AudioLDMPipeline.from_pretrained(
-                "cvssp/audioldm-s-full-v2",
-                torch_dtype=torch.float16
-            )
-            sfx_pipeline.to(DEVICE)
+        def work():
+            global sfx_pipeline
+            # Lazy load AudioLDM to save VRAM
+            if sfx_pipeline is None:
+                print("Loading AudioLDM pipeline...")
+                from diffusers import AudioLDMPipeline
 
-        print(f"Generating SFX for prompt: '{prompt}'...")
-        generator = torch.manual_seed(42)
-        audio = sfx_pipeline(
-            prompt,
-            num_inference_steps=50,
-            audio_length_in_s=duration,
-            generator=generator
-        ).audios[0]
+                sfx_pipeline = AudioLDMPipeline.from_pretrained(
+                    "cvssp/audioldm-s-full-v2",
+                    torch_dtype=torch.float16
+                )
+                sfx_pipeline.to(DEVICE)
 
-        # Convert tensor or numpy array to wav bytes
-        if hasattr(audio, "cpu"):
-            audio_np = audio.cpu().numpy()
-        else:
-            audio_np = audio
-        
-        # Write wav header
-        import scipy.io.wavfile as wavfile
-        wav_io = io.BytesIO()
-        # AudioLDM outputs at 16kHz sampling rate
-        wavfile.write(wav_io, 16000, audio_np)
-        wav_io.seek(0)
+            print(f"Generating SFX for prompt: '{prompt}'...")
+            generator = torch.manual_seed(42)
+            audio = sfx_pipeline(
+                prompt,
+                num_inference_steps=50,
+                audio_length_in_s=duration,
+                generator=generator
+            ).audios[0]
+
+            audio_np = audio.cpu().numpy() if hasattr(audio, "cpu") else audio
+
+            import scipy.io.wavfile as wavfile
+            buf = io.BytesIO()
+            # AudioLDM outputs at 16kHz sampling rate
+            wavfile.write(buf, 16000, audio_np)
+            buf.seek(0)
+            return buf
+
+        wav_io = await run_heavy(work)
 
         print("SFX generation complete.")
         return Response(content=wav_io.read(), media_type="audio/wav")
@@ -682,19 +717,23 @@ async def image_to_splat(file: UploadFile = File(...)):
     from sharp.utils.gaussians import save_ply
     try:
         contents = await file.read()
-        predictor = get_sharp()
-        with tempfile.TemporaryDirectory() as td:
-            in_path = Path(td) / "input.png"
-            Image.open(io.BytesIO(contents)).convert("RGB").save(in_path)
 
-            image_np, _, f_px = sharp_io.load_rgb(in_path)
-            height, width = image_np.shape[:2]
-            print(f"Running SHARP on {width}x{height} (f_px={f_px:.1f})...")
-            gaussians = _predict_gaussians(predictor, image_np, f_px, torch.device(DEVICE))
+        def work():
+            predictor = get_sharp()
+            with tempfile.TemporaryDirectory() as td:
+                in_path = Path(td) / "input.png"
+                Image.open(io.BytesIO(contents)).convert("RGB").save(in_path)
 
-            out_path = Path(td) / "world.ply"
-            save_ply(gaussians, f_px, (height, width), out_path)
-            ply_bytes = out_path.read_bytes()
+                image_np, _, f_px = sharp_io.load_rgb(in_path)
+                height, width = image_np.shape[:2]
+                print(f"Running SHARP on {width}x{height} (f_px={f_px:.1f})...")
+                gaussians = _predict_gaussians(predictor, image_np, f_px, torch.device(DEVICE))
+
+                out_path = Path(td) / "world.ply"
+                save_ply(gaussians, f_px, (height, width), out_path)
+                return out_path.read_bytes()
+
+        ply_bytes = await run_heavy(work)
 
         print(f"SHARP splat generated ({len(ply_bytes)} bytes).")
         return Response(content=ply_bytes, media_type="application/octet-stream")
@@ -884,7 +923,10 @@ async def place_objects(
             Image.open(io.BytesIO(base64.b64decode(entry.get("mask") if isinstance(entry, dict) else entry)))
             for entry in mask_entries
         ]
-        results, ground_plane_offset = locate_objects(await file.read(), mask_images)
+        # Projecting a million gaussians is CPU-bound but still blocks for
+        # seconds, so it goes through the same queue as the GPU work.
+        ply_bytes = await file.read()
+        results, ground_plane_offset = await run_heavy(locate_objects, ply_bytes, mask_images)
 
         located = sum(1 for r in results if r.get("located"))
         print(f"Placed {located}/{len(results)} objects (ground offset {ground_plane_offset:.3f}).")
@@ -927,25 +969,28 @@ async def splat_to_collider(
 
     try:
         contents = await file.read()
-        with tempfile.TemporaryDirectory() as td:
-            ply_path = Path(td) / "world.ply"
-            ply_path.write_bytes(contents)
 
-            xyz, opacity = read_splat_ply(ply_path)
-            mesh = build_collider(
-                xyz,
-                opacity,
-                voxel_size=voxel_size,
-                target_faces=target_faces,
-                max_distance=max_distance,
-                verbose=True,
-            )
-            ground_offset = detect_ground_offset(mesh)
+        # Voxelising and marching-cubing a large cloud runs for tens of seconds.
+        # It needs no GPU, but it is more than heavy enough to stall the loop.
+        def work():
+            with tempfile.TemporaryDirectory() as td:
+                ply_path = Path(td) / "world.ply"
+                ply_path.write_bytes(contents)
 
-            glb_path = Path(td) / "collider.glb"
-            mesh.export(glb_path)
-            glb_bytes = glb_path.read_bytes()
+                xyz, opacity = read_splat_ply(ply_path)
+                built = build_collider(
+                    xyz,
+                    opacity,
+                    voxel_size=voxel_size,
+                    target_faces=target_faces,
+                    max_distance=max_distance,
+                    verbose=True,
+                )
+                glb_path = Path(td) / "collider.glb"
+                built.export(glb_path)
+                return built, detect_ground_offset(built), glb_path.read_bytes()
 
+        mesh, ground_offset, glb_bytes = await run_heavy(work)
         size = mesh.bounds[1] - mesh.bounds[0]
 
         # Report the extent in viewer space so the caller can place the camera

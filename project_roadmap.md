@@ -76,6 +76,7 @@ graph TD
 
 ### 阶段二：本地开源 AI 推理节点部署 (Weeks 3-4)
 - [x] **初始化 AI 推理微服务框架**：搭建了 Python FastAPI + Uvicorn 架构的 `backend/server.py`，设计了延迟加载与 VRAM 清理机制以适配 5060 Ti 16GB 显存。
+- [x] **并发保护**：所有重端点改为经 `asyncio.to_thread` + `Semaphore(1)` 调度——推理不再阻塞事件循环（健康检查 9.04 s → 0.21 s，此前会导致前端 3 秒超时误报「后端离线」），并发请求排队而非争抢显存（实测 3 并发完美串行）。详见 PROJECT_REPORT §3.12。
 - [x] **图像预处理与 Clean Plate**：已实现 `/api/segment`（SAM 2 自动掩码 + base64 PNG 序列化）、`/api/crop`（Pillow 透明裁剪）与 `/api/inpaint`（Simple-LaMa 单次擦除所有掩码并集），完成自动抠图与背景擦除。
 - [x] **3D 物体生成（TripoSR 优化）**：已部署 `/api/image-to-3d`（TripoSR + 背景去除/前景缩放），输出 GLB 网格；E2E 世界已验证生成真实模型。
 - [x] **SFX 发生微服务**：已部署 `/api/generate-sfx` 碰撞/Foley 音效接口（当前采用 **AudioLDM-S**，非 Stable Audio Open；模型可后续替换）。

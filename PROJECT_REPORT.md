@@ -367,6 +367,56 @@ Marble 返回的 JSON 结构与本项目 `output/world/0-world.json` 的 `WorldM
 
 ---
 
+## 3.12 🔒 后端并发保护（2026-08-02）
+
+### A. 问题：同步推理阻塞了事件循环
+
+`backend/server.py` 的所有端点都是 `async def`，但内部调用的 PyTorch 推理是**同步阻塞**的。后果被实测量化：
+
+```
+空闲时  GET /  ->  0.24 s
+SHARP 推理期间  ->  9.04 s     ← 事件循环被占死
+```
+
+这不只是理论问题：前端的后端健康检查超时设为 **3 秒**（`src/app/api/generate/route.ts`），因此本地推理运行时打开创建弹窗，会显示「AI backend is unavailable」——一个用户可见的误报。
+
+同时，模型均为单 GPU 上的惰性全局单例。当前之所以没有 OOM，只是因为阻塞带来的**意外串行**；一旦有人把某个端点改成同步 `def`（FastAPI 会将其放入线程池），立刻变成真并发争抢显存。
+
+### B. 方案
+
+```python
+HEAVY_JOB_LOCK = asyncio.Semaphore(1)
+
+async def run_heavy(fn, *args, **kwargs):
+    """Run one blocking GPU/compute job off the event loop, serialised."""
+    async with HEAVY_JOB_LOCK:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+```
+
+两件事一起做才有意义：`to_thread` 让事件循环保持响应，信号量保证重任务严格串行。只做前者会把意外串行变成真并发 OOM；只做后者仍然阻塞。
+
+所有重端点（`segment`、`segment-point`、`inpaint`、`image-to-3d`、`generate-sfx`、`image-to-splat`、`place-objects`、`splat-to-collider`）均走 `run_heavy`；轻量的 `crop` 走不占锁的 `run_off_loop`。
+
+`place-objects`（投影百万高斯）与 `splat-to-collider`（体素化 + Marching Cubes）虽不用 GPU，但同样会阻塞数十秒，因此一并纳入队列。
+
+### C. 验证
+
+| | 改动前 | 改动后 |
+| :--- | :--- | :--- |
+| 推理期间健康检查 | **9.04 s** | **0.21 s**（与空闲无异） |
+
+三个并发 SHARP 请求：
+
+```
+req 1 finished at +11s
+req 3 finished at +22s
+req 2 finished at +33s      总耗时 33s = 3 × 11s
+```
+
+完美串行——各自 11 秒依次完成，全部成功产出 63 MB，服务器全程保持 0.24 s 响应。请求**排队而非争抢显存**。
+
+---
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：
