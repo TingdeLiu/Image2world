@@ -26,6 +26,7 @@ import { useRouter } from 'next/navigation'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset, WorldSceneProject } from '../types/world'
 import { type ControllerMode, useDebugStore } from '../store/debug'
 import { useAudioStore } from '../store/audio'
+import { LOCAL_TOOLS_ENABLED } from '../utils/localTools'
 import { ViewerQuality } from '../types/world'
 import { AppButton } from './AppButton'
 import { ChromeThumbnail, chrome } from './AppChrome'
@@ -88,7 +89,9 @@ export function WorldSidebar({
   const [shareComplete, setShareComplete] = useState(false)
   const butterfliesEnabled = useDebugStore((s) => s.butterfliesEnabled)
   const setButterfliesEnabled = useDebugStore((s) => s.setButterfliesEnabled)
-  const canOpenLocalFolders = false // dev folders available via api in local dev only
+  // These open a file manager or terminal on whichever machine runs the server,
+  // so they follow the same gate as the routes behind them.
+  const canOpenLocalFolders = LOCAL_TOOLS_ENABLED
 
   const [createModalOpen, setCreateModalOpen] = useState(false)
 

@@ -96,6 +96,8 @@ graph TD
 
 效果：端到端耗时 数分钟 → **43 秒**，参与推理的模型仅剩 SHARP。详见 PROJECT_REPORT §3.7。
 
+- [x] **本地开发工具部署门禁**：`/api/open-world-folder` 与 `/api/open-claude-terminal` 会在服务端机器上启动进程，生产环境默认返回 404（可用 `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` 显式开启）。因 BYOK 使项目变得可部署，该风险由理论转为现实。详见 PROJECT_REPORT §3.13。
+
 ### 阶段三：全栈 SaaS 系统开发 (Weeks 5-6)
 - [ ] **用户与权限**：集成 Clerk 登录，开发管理控制台。
 - [ ] **点数与计费**：设计点数消费表，集成 Stripe/Paypal，支持包月订阅和充值。

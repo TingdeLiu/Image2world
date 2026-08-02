@@ -24,6 +24,7 @@ import * as THREE from 'three'
 import { AppButton } from '../../components/AppButton'
 import { ChromePanel, ChromeThumbnail, chrome } from '../../components/AppChrome'
 import { ObjectRenderMode, type WorldObjectAsset, type WorldObjectPhysics, type WorldObjectPlacement, type WorldSceneProject, type WorldSceneSun } from '../../types/world'
+import { LOCAL_TOOLS_ENABLED } from '../../utils/localTools'
 import { OBJECT_SCALE, getInitialPlacements } from './placements'
 import { DROP_TARGET_LAYER } from './dropTargets'
 import { useSceneObjectVisual } from './useSceneObjectVisual'
@@ -1732,13 +1733,15 @@ export function PlacementEditorOverlay({ controller }: PlacementEditorOverlayPro
                 >
                   <FloppyDisk size={16} weight="regular" />
                 </AppButton>
-                <AppButton
-                  className="h-7 w-7 justify-center p-1"
-                  onClick={controller.openWorldFolder}
-                  aria-label="Open world folder"
-                >
-                  <FolderOpen size={16} weight="regular" />
-                </AppButton>
+                {LOCAL_TOOLS_ENABLED && (
+                  <AppButton
+                    className="h-7 w-7 justify-center p-1"
+                    onClick={controller.openWorldFolder}
+                    aria-label="Open world folder"
+                  >
+                    <FolderOpen size={16} weight="regular" />
+                  </AppButton>
+                )}
               </div>
               <div className="ml-auto flex items-center gap-1">
                 <AppButton

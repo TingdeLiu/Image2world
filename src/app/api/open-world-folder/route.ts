@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
 import { openFolder } from '../../../utils/worldsScanner'
+import { LOCAL_TOOLS_ENABLED } from '../../../utils/localTools'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,6 +10,14 @@ const worldsDir = path.join(process.cwd(), 'public', 'worlds')
 const repoRoot = process.cwd()
 
 export async function GET(request: NextRequest) {
+  // Opens a file manager on the host. Harmless on a laptop, but a deployed
+  // instance would let any visitor spawn processes there -- and `target=root`
+  // opens the repository itself. 404 rather than 403, so a disabled endpoint
+  // does not advertise that it exists.
+  if (!LOCAL_TOOLS_ENABLED) {
+    return new NextResponse('Not found', { status: 404 })
+  }
+
   const { searchParams } = new URL(request.url)
   const slug = searchParams.get('slug')
   const target = searchParams.get('target')

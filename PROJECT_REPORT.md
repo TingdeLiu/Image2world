@@ -417,6 +417,42 @@ req 2 finished at +33s      总耗时 33s = 3 × 11s
 
 ---
 
+## 3.13 🛡️ 本地开发工具的部署门禁（2026-08-02）
+
+### A. 为什么这个问题现在才变要紧
+
+`/api/open-world-folder` 与 `/api/open-claude-terminal` 会在**运行服务端的那台机器上启动进程**（文件管理器、终端）。笔记本上这是便利，一旦部署就是任何访问者都能触发的 RCE 面——其中 `target=root` 更是直接打开仓库根目录。
+
+此前这只是理论风险，因为生成必须依赖本地 GPU，项目实际上部署不了。**BYOK 改变了这一点**：填了 Marble Key 就不需要本地 GPU，项目变得可部署，风险随之变成现实。
+
+排查中还发现前端的 `canOpenLocalFolders` 被硬编码为 `false`——按钮从未显示过，但**API 路由一直开放**。这恰好印证了真正的暴露面在 API 层而非 UI。
+
+### B. 方案
+
+新增 `src/utils/localTools.ts`，前后端共用同一个表达式（`NEXT_PUBLIC_` 前缀使其在客户端与服务端都可读）：
+
+```ts
+export const LOCAL_TOOLS_ENABLED =
+  process.env.NODE_ENV !== 'production' ||
+  process.env.NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS === 'true'
+```
+
+开发环境默认启用；生产环境默认关闭，运营者可用 `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` 显式打开（用于在自己机器上跑生产构建）。禁用时返回 **404 而非 403**——关闭的端点不应暴露自己的存在。
+
+顺带把 `canOpenLocalFolders` 接上该门禁，使这些按钮在开发环境下**真正可用**（此前恒为隐藏）。
+
+### C. 验证
+
+| 场景 | `/api/open-claude-terminal` |
+| :--- | :--- |
+| 生产构建，未设变量 | **404** |
+| 生产构建，`NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` | 501（"仅支持 macOS"，即门禁已放行） |
+| 生产构建，`/api/worlds` | 200（正常路由不受影响） |
+
+门禁表达式另经 5 组环境组合枚举验证，包含 `flag="1"` 这类**不应**放行的边界。
+
+---
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：
