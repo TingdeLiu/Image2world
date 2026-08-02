@@ -1,4 +1,3 @@
-// @ts-nocheck
 'use client'
 
 import { Component, Suspense, useRef, useEffect, useState, type ReactNode } from 'react'

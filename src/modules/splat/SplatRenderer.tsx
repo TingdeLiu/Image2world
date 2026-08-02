@@ -24,6 +24,12 @@ uniform float falloffRate;`
 const DEFAULT_SHARP_RANGE = 2
 const DEFAULT_FALLOFF_RATE = 0.3
 
+/**
+ * The two uniforms the patched shader adds. Spark's material types do not know
+ * about them, so we describe just the shape we read and write.
+ */
+type CustomFocusUniforms = Record<string, { value: number } | undefined>
+
 const SparkRendererEl = extend(SparkRenderer)
 const SplatMeshEl = extend(SplatMesh)
 const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
@@ -63,8 +69,7 @@ export function SplatRenderer({
       const spark = sparkRef.current
       if (!spark) return
       const mat = spark.material
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const u = mat.uniforms as any
+      const u = mat.uniforms as CustomFocusUniforms
       if (!u.sharpRange) u.sharpRange = { value: DEFAULT_SHARP_RANGE }
       if (!u.falloffRate) u.falloffRate = { value: DEFAULT_FALLOFF_RATE }
       if (!mat.vertexShader.includes('uniform float sharpRange;')) {
@@ -79,8 +84,7 @@ export function SplatRenderer({
       const spark = sparkRef.current
       if (!spark) return
       const s = useDebugStore.getState()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const u = spark.material.uniforms as any
+      const u = spark.material.uniforms as CustomFocusUniforms
       if (s.viewerQuality === ViewerQuality.High && s.dofEnabled) {
         spark.focalDistance = s.focalDistance
         spark.apertureAngle = s.apertureAngle
