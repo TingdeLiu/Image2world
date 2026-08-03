@@ -17,7 +17,18 @@ environment, editable 3D objects, physics, and generated spatial audio.
 
 </div>
 
-![image2world turns a source photo into a navigable Gaussian-splat scene](./docs/media/image2world-hero.png)
+![Image2World turns a source photo into a navigable Gaussian-splat scene](./docs/media/image2world-hero.png)
+
+<div align="center">
+
+**The world is closed on every side.** Turning around inside it shows a corridor
+and a glass partition that the source photo never captured — a generative world
+model fills in what the camera could not see, so you can walk anywhere instead
+of falling out the back.
+
+</div>
+
+![Four cardinal views inside one generated world, all of them complete](./docs/media/marble-360.png)
 
 image2world is an open-source, local-first pipeline that decomposes one image
 into a reconstructed 3D environment and interactive foreground objects. It then
