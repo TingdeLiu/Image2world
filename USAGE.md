@@ -1,4 +1,4 @@
-# ImageWorld 使用说明
+# Image2World 使用说明
 
 把**单张图片**变成可漫游的 3D 世界：SHARP 生成真实背景高斯溅射 + 你挑选的物体（SAM 分割 → TripoSR 出 3D 网格）+ AudioLDM 碰撞音效。本文是日常操作手册。安装见 [backend/README.md](./backend/README.md)。
 

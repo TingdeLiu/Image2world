@@ -1,4 +1,4 @@
-# ImageWorld 实现说明
+# Image2World 实现说明
 
 > 本文讲解**这个项目是如何工作的**——架构、数据流、坐标系，以及那些「为什么是这样做的」。
 > 按时间顺序的迭代记录见 [`PROJECT_REPORT.md`](../PROJECT_REPORT.md)，计划见 [`project_roadmap.md`](../project_roadmap.md)。
@@ -120,6 +120,19 @@ Marble 的响应结构与本项目的 `WorldManifest` **完全一致**——这�
 扫描器（`src/utils/worldsScanner.ts`）按 **`<序号>-<名称>.<扩展名>`** 解析文件，序号支持同一世界的多个版本。`0-world-full_res` 中的 `full_res`/`500k`/`150k`/`100k` 是 LOD 档位关键字。
 
 **不遵守命名约定的文件会被静默忽略**——这是排查「资产明明在磁盘上却加载不出来」时第一个该检查的地方。
+
+### 命名中的历史残留
+
+产品名为 **Image2World**，但以下标识符**刻意保留旧的 `imageworld` 拼写**，因为改名会破坏兼容：
+
+| 标识符 | 改名的后果 |
+| :--- | :--- |
+| `imageworld:marble-api-key`（localStorage） | 用户已保存的 API Key 消失 |
+| `imageworld-debug` / `imageworld-audio`（localStorage） | 所有本地设置被重置 |
+| `IMAGEWORLD_BACKEND_URL` / `_SEGMENTER` / `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS` | 已有环境配置失效 |
+| `imageworld:objectId` / `imageworld:physics`（USD 属性） | 已导出的 `.usda` 文件对不上 |
+
+**用户可见的一切显示名称都是 Image2World**；上述是内部键与数据格式，不对外呈现。
 
 ### 生成的原子性
 

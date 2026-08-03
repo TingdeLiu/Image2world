@@ -1,6 +1,6 @@
-# ImageWorld 3D 场景生成管线开发报告与使用手册 (Development Report & User Manual)
+# Image2World 3D 场景生成管线开发报告与使用手册 (Development Report & User Manual)
 
-本文件详细记录了 ImageWorld 在本次迭代中实现的端到端 3D 场景生成管线、前端拖拽上传与推理状态跟踪 UI、已修改的文件列表、底层代码架构，以及详细的用户使用与后续商业化规划。
+本文件详细记录了 Image2World 在本次迭代中实现的端到端 3D 场景生成管线、前端拖拽上传与推理状态跟踪 UI、已修改的文件列表、底层代码架构，以及详细的用户使用与后续商业化规划。
 
 ---
 
@@ -75,7 +75,7 @@ graph TD
    * TripoSR (约 1.6GB) 和 AudioLDM-S (约 196MB) 在接口首次被调用时会自动通过 Hugging Face Hub 下载并缓存。
 
 ### 3.2 启动项目
-为测试并启动整个 ImageWorld 场景生成服务，请分别启动以下两个服务：
+为测试并启动整个 Image2World 场景生成服务，请分别启动以下两个服务：
 
 #### 第一步：启动 AI 推理后端 (FastAPI)
 打开终端控制台，激活 Conda 后运行：

@@ -319,7 +319,7 @@ async function runGeneration(
       updated_at: new Date().toISOString(),
       notes: marbleApiKey
         ? 'Generated with World Labs Marble (marble-1.1)'
-        : 'Generated with the local ImageWorld pipeline (Apple SHARP)',
+        : 'Generated with the local Image2World pipeline (Apple SHARP)',
     }
     fs.writeFileSync(path.join(worldDir, 'project.json'), JSON.stringify(projectJson, null, 2))
 

@@ -30,11 +30,11 @@ export function HomeLanding({ featuredWorld }: { featuredWorld?: FeaturedWorld }
       <div className="landing-grain pointer-events-none fixed inset-0 z-50 opacity-[0.035]" />
 
       <nav className="relative z-20 mx-auto flex w-full max-w-[1480px] items-center justify-between px-5 py-5 sm:px-8 lg:px-12">
-        <Link href="/" className="group flex items-center gap-3" aria-label="ImageWorld home">
+        <Link href="/" className="group flex items-center gap-3" aria-label="Image2World home">
           <span className="grid h-9 w-9 place-items-center rounded-full border border-white/15 bg-white/[0.04] transition group-hover:rotate-[-8deg] group-hover:border-[#e5ff63]/60">
             <GlobeHemisphereWest size={18} weight="duotone" />
           </span>
-          <span className="font-display text-lg tracking-[-0.03em]">ImageWorld</span>
+          <span className="font-display text-lg tracking-[-0.03em]">Image2World</span>
           <span className="hidden rounded-full border border-white/10 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.18em] text-white/40 sm:inline-flex">
             local ai studio
           </span>
@@ -229,7 +229,7 @@ export function HomeLanding({ featuredWorld }: { featuredWorld?: FeaturedWorld }
 
       <footer className="border-t border-white/10 px-5 py-6 sm:px-8 lg:px-12">
         <div className="mx-auto flex w-full max-w-[1480px] flex-col gap-3 font-mono text-[9px] uppercase tracking-[0.14em] text-white/32 sm:flex-row sm:items-center sm:justify-between">
-          <span>ImageWorld · Image to interactive 3D</span>
+          <span>Image2World · Image to interactive 3D</span>
           <span>Built for creators who want control</span>
         </div>
       </footer>

@@ -109,7 +109,7 @@ function ViewerLoadingOverlay({
         <div className="w-full max-w-sm">
           <div className="mb-8 flex items-center gap-3 font-mono text-[10px] uppercase tracking-[0.28em] text-white/45">
             <span className="h-1.5 w-1.5 rounded-full bg-white/60" />
-            ImageWorld / scene loader
+            Image2World / scene loader
           </div>
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.2em] text-white/35">
             Opening world

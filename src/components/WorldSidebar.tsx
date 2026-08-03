@@ -99,7 +99,7 @@ export function WorldSidebar({
     const activeWorld = worlds.find((world) => world.slug === activeSlug)
     const title = activeWorld?.project.display_name || activeSlug
     const shareData = {
-      title: `${title} · ImageWorld`,
+      title: `${title} · Image2World`,
       text: `Explore “${title}”, an interactive 3D world made from a single image.`,
       url: window.location.href,
     }
@@ -158,7 +158,7 @@ export function WorldSidebar({
               <ListIcon size={16} weight="regular" />
             </span>
           )}
-          <span>ImageWorld</span>{activeSlug && <span className="text-white/40 sm:hidden md:hidden">/ {activeSlug}</span>}
+          <span>Image2World</span>{activeSlug && <span className="text-white/40 sm:hidden md:hidden">/ {activeSlug}</span>}
         </AppButton>
         <AppButton
           onClick={() => setButterfliesEnabled(!butterfliesEnabled)}

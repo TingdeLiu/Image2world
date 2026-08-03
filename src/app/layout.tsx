@@ -5,11 +5,11 @@ import './globals.css'
 
 export const metadata: Metadata = {
   title: {
-    default: 'ImageWorld — Step Inside Your Image',
-    template: '%s · ImageWorld',
+    default: 'Image2World — Step Inside Your Image',
+    template: '%s · Image2World',
   },
   description: 'Turn one image into an explorable, editable 3D world with local AI, physics, separated objects, and spatial sound.',
-  applicationName: 'ImageWorld',
+  applicationName: 'Image2World',
   keywords: [
     'image to 3D',
     'AI 3D world generator',
@@ -20,13 +20,13 @@ export const metadata: Metadata = {
   robots: { index: true, follow: true },
   openGraph: {
     type: 'website',
-    title: 'ImageWorld — Step Inside Your Image',
+    title: 'Image2World — Step Inside Your Image',
     description: 'Turn one image into an explorable, editable 3D world.',
-    siteName: 'ImageWorld',
+    siteName: 'Image2World',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'ImageWorld — Step Inside Your Image',
+    title: 'Image2World — Step Inside Your Image',
     description: 'Turn one image into an explorable, editable 3D world.',
   },
 }

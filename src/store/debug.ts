@@ -134,6 +134,8 @@ export const useDebugStore = create<DebugStore>()(
       setLevaCollapsed: (levaCollapsed) => set({ levaCollapsed }),
     }),
     {
+      // Deliberately still "imageworld": renaming the key would discard every
+      // saved setting on upgrade. The product name is Image2World.
       name: 'imageworld-debug',
       version: 12,
       skipHydration: true,

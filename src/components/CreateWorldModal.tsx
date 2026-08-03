@@ -121,6 +121,8 @@ function friendlyFileName(file: File) {
 
 // The key is the user's own and stays on their machine: it is kept in
 // localStorage and attached per request, never persisted server-side.
+// Storage key keeps the old "imageworld" spelling on purpose: renaming it would
+// silently drop the API key users already saved. Display names use Image2World.
 const MARBLE_KEY_STORAGE = 'imageworld:marble-api-key'
 const MARBLE_KEYS_URL = 'https://platform.worldlabs.ai/api-keys'
 

@@ -1,4 +1,4 @@
-# ImageWorld 本地 AI 推理后端
+# Image2World 本地 AI 推理后端
 
 本目录包含基于 Python FastAPI 的后端，用于在你本地的 **RTX 5060 Ti 16GB** GPU 上运行开源模型（SAM 2、LaMa、TripoSR、Stable Audio Open 等）。
 

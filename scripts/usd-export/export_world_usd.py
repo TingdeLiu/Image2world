@@ -1,4 +1,4 @@
-"""Export an ImageWorld project to a portable OpenUSD bundle.
+"""Export an Image2World project to a portable OpenUSD bundle.
 
 The background Gaussian splat is written with NVIDIA's `usd-convert-gsplat`
 (Apache-2.0) as a `ParticleField3DGaussianSplat` prim -- the OpenUSD geometry
@@ -482,7 +482,7 @@ def build_stage(
 
     root = UsdGeom.Xform.Define(stage, "/World")
     stage.SetDefaultPrim(root.GetPrim())
-    root.GetPrim().SetMetadata("comment", f"ImageWorld export of '{world.display_name}' (v{world.version_index})")
+    root.GetPrim().SetMetadata("comment", f"Image2World export of '{world.display_name}' (v{world.version_index})")
     if z_up:
         # Everything below is authored in the viewer's Y-up frame; rotate the
         # whole world so +Y becomes +Z for Z-up consumers such as Isaac Sim,
@@ -610,7 +610,7 @@ def package_usdz(main_path: Path, usdz_path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export an ImageWorld project to OpenUSD.")
+    parser = argparse.ArgumentParser(description="Export an Image2World project to OpenUSD.")
     parser.add_argument("slug", help="World slug under public/worlds/")
     parser.add_argument("--lod", default="500k", choices=LOD_CHOICES, help="Background splat LOD (default: 500k)")
     parser.add_argument(

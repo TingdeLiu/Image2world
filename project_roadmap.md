@@ -1,4 +1,4 @@
-# ImageWorld 项目商业化规划与技术路线图 (Roadmap)
+# Image2World 项目商业化规划与技术路线图 (Roadmap)
 
 本项目致力于将单张图片转化为交互式 3D 空间与物体的管线（参考 `image-blaster`），并通过**开源模型自部署**替代昂贵的商业 API（如 Fal.ai、World Labs、ElevenLabs），最终实现低成本、高毛利的商业化盈利。
 

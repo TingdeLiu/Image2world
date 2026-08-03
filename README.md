@@ -17,7 +17,7 @@ environment, editable 3D objects, physics, and generated spatial audio.
 
 </div>
 
-![image2world turns a source photo into a navigable Gaussian-splat scene](./docs/media/imageworld-hero.png)
+![image2world turns a source photo into a navigable Gaussian-splat scene](./docs/media/image2world-hero.png)
 
 image2world is an open-source, local-first pipeline that decomposes one image
 into a reconstructed 3D environment and interactive foreground objects. It then
