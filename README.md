@@ -1,6 +1,6 @@
 <div align="center">
 
-# image2world
+# Image2World
 
 ### One image in. A navigable 3D world out.
 
@@ -30,34 +30,32 @@ of falling out the back.
 
 ![Four cardinal views inside one generated world, all of them complete](./docs/media/marble-360.png)
 
-image2world is an open-source, local-first pipeline that decomposes one image
-into a reconstructed 3D environment and interactive foreground objects. It then
-reassembles those assets in a browser-based world that you can explore, edit,
-and save.
+Image2World turns a single photo into a space you can walk through — a Gaussian
+splat you can see, a collision mesh you can bump into, and a scene descriptor you
+can edit. Generated assets are ordinary local files (PLY/SPZ, GLB, audio, JSON),
+not records locked behind a hosted API.
 
-The source image stays visible in the viewer, making the reconstruction easy to
-compare with its input. Generated assets are ordinary local files — PLY/SPZ,
-GLB, audio, and JSON — rather than records locked behind a hosted API.
+The product is **the space itself**, not props inside it. An earlier version
+rebuilt each piece of furniture as a separate physics object; that was removed
+once it became clear the room mattered more than the chairs in it (see
+[the implementation notes](./docs/IMPLEMENTATION.md#71-放弃前景物体实例)).
 
-## Why image2world
+## Why Image2World
 
-- **A scene, not a depth effect.** Apple SHARP reconstructs the inpainted
-  background as a 3D Gaussian splat with multiple LODs, and the splat cloud is
-  turned into a collision proxy so the world is solid, not just visible.
-- **Objects you can interact with.** SAM 2/SAM 3 isolates foreground objects,
-  TripoSR turns them into GLB meshes, and Rapier gives them physics.
-- **Sound that belongs to the object.** AudioLDM generates short Foley effects
-  that play during interactions and collisions.
-- **A world you can edit.** The built-in editor supports placement, rotation,
-  scale, rigid/static/ghost bodies, lighting, ground, and shadow controls.
-- **Local ownership.** Inference runs through a local FastAPI service and world
-  assets are stored under `public/worlds/`.
-- **Responsive delivery.** The viewer streams loading progress, supports
-  cancellation and retry, and selects 100k/150k/500k/full-resolution splat LODs
-  based on the chosen quality.
-
-Above: a world reconstructed from one office photo. The source image stays
-docked in the corner so the reconstruction can be compared against its input.
+- **A scene, not a depth effect.** The photo becomes a 3D Gaussian splat with
+  four LODs, and the splat cloud is turned into a collision mesh, so the world is
+  solid rather than merely visible.
+- **Two pipelines, one interface.** Run locally on your own GPU in seconds, or
+  hand it a World Labs Marble key and get a fully enclosed world you can turn
+  around inside. Same upload dialog, same output format.
+- **Bring your own key.** Cloud generation bills to your account, not to this
+  project. The key lives in your browser, is sent per request, and is never
+  written to disk or logged server-side.
+- **A world you can edit.** Placement, rotation, scale, rigid/static/ghost
+  bodies, lighting, ground, and shadow controls, saved to `scene.json`.
+- **Local ownership.** Assets live under `public/worlds/`; the source photo stays
+  docked in the viewer so the reconstruction can be compared against its input.
+- **Exportable.** OpenUSD bundles for simulation (Isaac Sim / Omniverse).
 
 ## The scene editor
 
@@ -72,41 +70,44 @@ your own on first run.
 
 ## How it works
 
+The upload dialog picks a backend from one thing: whether you supplied a Marble
+API key.
+
 ```mermaid
 flowchart LR
-    A["Source image"] --> B{"Choose objects"}
-    B --> C["SAM 2<br/>automatic or point prompts"]
-    B --> D["SAM 3<br/>concept prompts"]
-    C --> E["RGBA object crops"]
-    D --> E
-    E --> F["TripoSR<br/>GLB meshes"]
-    E --> G["AudioLDM<br/>Foley effects"]
-    A --> H["LaMa<br/>clean plate"]
-    H --> I["Apple SHARP<br/>Gaussian splat"]
-    I --> J["PLY/SPZ LODs"]
-    I --> M["Collision proxy<br/>+ ground calibration"]
-    F --> K["scene.json"]
-    G --> K
-    J --> K
-    M --> K
-    K --> L["Next.js + Three.js<br/>interactive world"]
+    A["Source photo"] --> B{"Marble API key?"}
+    B -->|"no"| C["Apple SHARP<br/>single-view reconstruction"]
+    B -->|"yes"| D["World Labs Marble<br/>generative world model"]
+    C --> E["PLY + 3 LODs"]
+    E --> F["Voxel collision mesh<br/>+ ground calibration"]
+    D --> G["SPZ x4 + collision mesh<br/>+ panorama"]
+    F --> H["scene.json"]
+    G --> H
+    H --> I["Next.js + Three.js<br/>walkable world"]
 ```
 
-Object selection supports three workflows:
-
-| Mode | What you do | Segmentation |
+|  | Local (SHARP) | Cloud (Marble) |
 | --- | --- | --- |
-| Automatic | Leave object prompts empty | SAM 2 selects the largest movable regions |
-| Concept-guided | Enter labels such as `chair, monitor, lamp` | SAM 3 returns semantically named instances |
-| Point-guided | Click the exact objects in the uploaded image | SAM 2 point prompts provide precise masks |
+| Time | **16–43 s** | ~8 min |
+| Cost | free | ~$1.20, billed to your key |
+| Needs a GPU | yes | **no** |
+| Behind the camera | nothing — you walk out into empty space | **complete** |
+| Away from the capture pose | streaks and smearing | **stays sharp** |
 
-Priority is **point-guided → concept-guided → automatic** when more than one
-input is present.
+The difference is not quality tuning, it is what the two things *are*. SHARP
+reconstructs surfaces the camera saw. Marble is a generative world model: it
+invents the rest of the room. Scanning 24 compass directions at body height from
+the spawn point, a SHARP world leaves **8 of them with no geometry at all** —
+all behind the camera, because a photo cannot see the photographer's back. The
+same measurement on a Marble world returns **zero**.
+
+Start local, and add a key when you want a world that closes behind you.
 
 ## Quick start
 
-image2world has two local processes: the browser app and the AI inference
-backend.
+Image2World has two local processes: the browser app and the AI inference
+backend. **If you only intend to generate through Marble, you can skip the
+backend entirely** — cloud generation needs no local GPU.
 
 ### Prerequisites
 
@@ -119,15 +120,14 @@ backend.
 The current backend configuration has been exercised on a 16 GB NVIDIA GPU.
 Other GPUs may work, but inference time and memory pressure vary by model.
 
-### 1. Install the AI backend
+### 1. Install the AI backend (local pipeline only)
 
 Complete the one-time model installation in
-[`backend/README.md`](./backend/README.md). It covers the CUDA-enabled PyTorch
-environment, SAM 2, TripoSR, **SHARP**, model weights, and optional SAM 3
-support.
+[`backend/README.md`](./backend/README.md). Generation itself only needs
+**SHARP**; the other models are kept for the object endpoints, which are no
+longer part of the pipeline and load lazily, so an uncalled one costs no VRAM.
 
-> Do not skip the SHARP step. Without it the pipeline still reports success but
-> the background is not reconstructed at all, and the failure is easy to miss.
+> Do not skip the SHARP step — without it local generation fails outright.
 
 After setup, start the service:
 
@@ -159,12 +159,18 @@ hundreds of megabytes each and reconstruct the room in the source photo.
 
 1. Select **Create New World**.
 2. Name the world and upload an indoor image.
-3. Optionally enter object concepts or click objects in the preview.
+3. Optionally paste a **Marble API key** ([get one
+   here](https://platform.worldlabs.ai/api-keys)) to generate a fully enclosed
+   world in the cloud. Leave it empty to use your local GPU.
 4. Select **Generate World** and follow the streamed stage-by-stage progress.
 5. Explore the result, or use the pencil button to open the scene editor.
 
-The first run is slower because model weights are loaded or downloaded lazily.
-Generation time depends on the GPU, source resolution, and number of objects.
+The first local run is slower because model weights are loaded or downloaded
+lazily. The key is remembered in your browser for next time.
+
+> Marble's API has **no free tier** — the free generations on
+> marble.worldlabs.ai belong to the web app and are a separate wallet. A world
+> costs about 1500 credits (~$1.20), plus 80 for the image upload.
 
 ## Controls
 
@@ -173,7 +179,8 @@ Generation time depends on the GPU, source resolution, and number of objects.
 | Move | `W` `A` `S` `D` |
 | Look | Mouse |
 | Jump | `Space` |
-| Switch navigation | **Fly** / character controller button |
+| Hide the interface | `` ` `` |
+| Switch navigation | **FPS** / **Fly** button — FPS is the default and the one with gravity, collisions, and jumping; Fly moves the camera directly for inspection |
 | Change splat detail | **Low** / **High** quality button |
 | Edit a world | Pencil button beside the world |
 | Reset scene objects | Reset button |
@@ -185,30 +192,34 @@ Every world is self-contained:
 
 ```text
 public/worlds/<slug>/
-├── project.json                 # Project identity and display name
-├── scene.json                   # Placements, physics, lighting, and ground
+├── project.json                 # Project identity, display name, generator
+├── scene.json                   # Placements, physics, lighting, ground calibration
 ├── source/
 │   └── 0-source.png             # Original input
 └── output/
     ├── world/
-    │   ├── 0-world.json         # World asset manifest + ground calibration
-    │   ├── 0-world-full_res.ply # SHARP Gaussian splat
-    │   ├── 0-world-500k.ply     # Viewer LODs
-    │   ├── 0-world-150k.ply
-    │   ├── 0-world-100k.ply
-    │   ├── 0-world.glb          # Background collision proxy
-    │   └── 0-world-plate.jpg    # Inpainted clean plate
-    ├── <object>/
-    │   ├── 0-<object>.glb       # Generated interactive mesh
-    │   ├── 0-<object>.png       # Segmented reference image
-    │   ├── object.json
-    │   └── sfx/
+    │   ├── 0-world.json         # Asset manifest + coordinate metadata
+    │   ├── 0-world-full_res.spz # Gaussian splat (.ply from SHARP, .spz from Marble)
+    │   ├── 0-world-500k.spz     # Viewer LODs
+    │   ├── 0-world-150k.spz
+    │   ├── 0-world-100k.spz
+    │   ├── 0-world.glb          # Collision mesh
+    │   └── 0-world-pano.png     # 360 panorama (Marble only)
     └── sfx/                     # World ambience
 ```
 
-SPZ backgrounds are also supported. The scanner discovers available versions
-and assets from disk; failed generation jobs remain hidden in a staging
-directory and are cleaned up instead of appearing as incomplete worlds.
+Both pipelines write the same layout, so a world is interchangeable regardless of
+how it was made. The scanner discovers versions and assets from disk by the
+`<index>-<name>.<ext>` convention — **a file that does not follow it is silently
+ignored**, which is the first thing to check when an asset is on disk but will
+not load. Failed jobs stay hidden in a staging directory and are cleaned up
+rather than appearing as half-built worlds.
+
+`0-world.json` and `scene.json` both carry `metric_scale_factor`, `flip_y`, and
+`ground_plane_offset`; `scene.json` wins. Getting these wrong yields a room of
+the wrong size or upside down — Marble's scale factor is emphatically not 1. The
+transform chain is written out in
+[the implementation notes](./docs/IMPLEMENTATION.md).
 
 ## Architecture
 
@@ -219,32 +230,45 @@ directory and are cleaned up instead of appearing as incomplete worlds.
 | Physics | `@react-three/rapier` | Colliders and rigid/static/ghost object bodies |
 | State and UI | Zustand, Radix Themes, Tailwind CSS | Viewer state, controls, editor interface |
 | AI service | FastAPI, PyTorch | Local model lifecycle and inference endpoints |
-| Reconstruction | SHARP, LaMa | Single-image splat background and clean-plate inpainting |
-| Collision | scikit-image, trimesh | Voxel collision proxy and ground calibration from the splat cloud |
-| Object pipeline | SAM 2/SAM 3, TripoSR | Selection, segmentation, and image-to-3D meshes |
-| Audio | AudioLDM | Object Foley effects and ambience |
+| Local reconstruction | Apple SHARP | Single-image Gaussian splat |
+| Cloud reconstruction | World Labs Marble | Generative world model, via the user's own key |
+| Collision | scikit-image, trimesh | Voxel collision mesh and ground calibration from the splat cloud |
 
-The browser-facing generation route coordinates the complete pipeline, streams
+The browser-facing generation route coordinates the whole pipeline, streams
 newline-delimited progress events, propagates cancellation, applies per-stage
-timeouts, and writes the final project only after generation succeeds.
+timeouts, and publishes the project only after generation succeeds.
+
+Backend endpoints for the retired object pipeline (`/api/segment`, `/api/crop`,
+`/api/image-to-3d`, `/api/generate-sfx`, `/api/inpaint`) still exist and still
+work — they are lazily loaded, so keeping them costs nothing until called.
+
+Heavy endpoints run through a semaphore on a worker thread, so inference neither
+blocks the event loop nor lets two jobs contend for VRAM: concurrent requests
+queue instead.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `IMAGEWORLD_BACKEND_URL` | `http://localhost:8000` | Address of the local FastAPI service |
-| `IMAGEWORLD_SEGMENTER` | `sam2` | Automatic segmentation backend; use `sam3` for semantic concepts |
-
-PowerShell example:
+| `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS` | unset | Re-enables "open world folder" / "open terminal" in a production build |
+| `IMAGEWORLD_SEGMENTER` | `sam2` | Segmentation backend for the retired object endpoints; `sam3` adds semantic labels |
 
 ```powershell
 $env:IMAGEWORLD_BACKEND_URL = "http://localhost:8000"
-$env:IMAGEWORLD_SEGMENTER = "sam3"
 npm run dev
 ```
 
-If SAM 3 is requested but unavailable, the backend records the problem and
-falls back to SAM 2.
+The Marble API key is **not** an environment variable — it is entered in the
+create dialog and kept in your browser's local storage, so a deployed instance
+never holds anyone's credentials.
+
+> The local-tool routes spawn a file manager or a terminal **on whichever
+> machine runs the server**. They 404 in production for that reason. Only set
+> `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` when the server is your own machine.
+
+The variable names keep the older `IMAGEWORLD_` spelling deliberately; renaming
+them would break existing configurations. Same for the browser storage keys.
 
 ## Development
 
@@ -254,9 +278,18 @@ Run the complete frontend quality gate:
 npm run check
 ```
 
-This executes ESLint, TypeScript type checking, and a production Next.js build.
-Run it with the dev server stopped — `next build` and `next dev` share `.next`
-and will clobber each other.
+This executes ESLint, TypeScript type checking, the unit tests, and a production
+Next.js build. Run it with the dev server stopped — `next build` and `next dev`
+share `.next` and will clobber each other, and the symptom is a runtime
+`Cannot find module './vendor-chunks/....js'` that looks like a code bug but is
+not. To check types while the dev server runs, use `npm run lint && npx tsc
+--noEmit`.
+
+Tests alone (Node's built-in runner, no extra dependencies):
+
+```bash
+npm test
+```
 
 The USD exporter has its own suite, which also guards the transform semantics it
 duplicates from the TypeScript runtime:
@@ -313,15 +346,20 @@ Useful entry points:
 
 ## Current limitations
 
-- SHARP performs **single-view reconstruction**, not full 360° scene capture.
-  Large camera moves behind unseen surfaces reveal missing information.
-- For the same reason the collision proxy is not a sealed room. It covers the
-  visible floor, camera-facing walls, and the fronts of objects; walk past the
-  edge of what the photo could see and you pass through. The flat ground plane
-  is what keeps you from falling.
-- Local generation is GPU-intensive, and first use can involve large model
-  downloads.
-- TripoSR prioritizes speed over production-grade object geometry.
+Everything below applies to the **local** pipeline. Marble worlds are closed on
+every side and stay sharp as you move, which is what you pay for.
+
+- SHARP performs **single-view reconstruction**, not 360° capture. Measured on a
+  real room, 8 of 24 directions at body height had no geometry at all, all of
+  them behind the camera.
+- The collision mesh is therefore not a sealed room: walk past the edge of what
+  the photo could see and you pass through. The flat ground plane is what keeps
+  you from falling, so you end up standing in empty space rather than plummeting.
+- Leaving the capture pose smears occluded regions into streaks. This is
+  inherent, not a tuning problem — single-view gives each pixel one depth, so
+  objects on a desk become flat patches with no sides. Filtering the point cloud
+  was tried and measured, and does not help; it only leaves holes.
+- Local generation is GPU-intensive, and first use downloads several GB.
 - Some upstream models have licenses or access conditions that differ from this
   repository's source license.
 
@@ -330,11 +368,14 @@ the project more useful than a polished demo that hides its boundaries.
 
 ## Roadmap
 
-- Higher-fidelity image-to-3D backend adapters
+- SPZ output for the local pipeline. Marble already returns SPZ, roughly a
+  quarter the bytes per splat of the PLY that SHARP produces
+- A self-hosted world model as an alternative to a paid API. Matrix-3D is the
+  leading candidate — MIT licensed and it fits in 12 GB — though renting a cloud
+  GPU to run it is not obviously cheaper than Marble's $1.20 per world
 - Resumable generation jobs and persistent inference queues
-- Portable world bundles for sharing and deployment — still open. OpenUSD export
-  (`npm run export:usd`) covers the simulation path (Isaac Sim / Omniverse), not
-  general sharing
+- Portable world bundles for sharing. OpenUSD export (`npm run export:usd`)
+  covers the simulation path (Isaac Sim / Omniverse), not general sharing
 - A cross-platform model setup and hardware diagnostic command
 - More automated browser, pipeline, and visual regression coverage
 
@@ -350,26 +391,28 @@ Before submitting a change:
 npm run check
 ```
 
-If image2world is useful to your research or prototyping, consider starring the
+If Image2World is useful to your research or prototyping, consider starring the
 repository — it helps other builders discover the project.
 
 ## License
 
-image2world source code is released under the [MIT License](./LICENSE).
+Image2World source code is released under the [MIT License](./LICENSE).
 Downloaded or bundled model weights are governed by their respective upstream
 licenses. Review the SAM, TripoSR, AudioLDM, and SHARP terms before commercial
-deployment.
+deployment, and World Labs' terms if you generate through Marble.
 
 ## Acknowledgements
 
-image2world builds on
+Image2World builds on SHARP from Apple Machine Learning Research and
+[Marble](https://www.worldlabs.ai/) from World Labs for reconstruction, plus
+Three.js, React Three Fiber, Spark, and Rapier for the runtime.
+
+The retired object pipeline — still present as backend endpoints — uses
 [SAM 2](https://github.com/facebookresearch/sam2) and
 [SAM 3](https://github.com/facebookresearch/sam3) from Meta AI,
-SHARP from Apple Machine Learning Research,
 [TripoSR](https://github.com/VAST-AI-Research/TripoSR),
-[LaMa](https://github.com/advimman/lama),
-[AudioLDM](https://github.com/haoheliu/AudioLDM), Three.js, React Three Fiber,
-Spark, and Rapier.
+[LaMa](https://github.com/advimman/lama), and
+[AudioLDM](https://github.com/haoheliu/AudioLDM).
 
 USD export uses
 [`usd-convert-gsplat`](https://github.com/NVIDIA-Omniverse/usd-convert-gsplat)
