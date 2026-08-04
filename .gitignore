@@ -71,3 +71,9 @@ __pycache__/
 # the repository. The app renders a create-world screen when this is empty.
 /public/worlds/*
 !/public/worlds/.gitkeep
+
+# One exception: a trimmed sample world so a fresh clone has something to walk
+# around in without a GPU or an API key. It carries the 100k and 500k LODs and
+# the source photo, but not full_res (28 MB).
+!/public/worlds/demo-office/
+!/public/worlds/demo-office/**

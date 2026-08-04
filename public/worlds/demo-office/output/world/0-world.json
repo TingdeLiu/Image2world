@@ -1,0 +1,17 @@
+{
+  "world_id": "demo-office",
+  "display_name": "Demo Office",
+  "assets": {
+    "splats": {
+      "spz_urls": {
+        "500k": "",
+        "100k": ""
+      },
+      "semantics_metadata": {
+        "metric_scale_factor": 1.1314163,
+        "ground_plane_offset": 1.3834634,
+        "flip_y": true
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "instances": [],
+  "sun": {
+    "intensity": 1,
+    "rotation": [
+      0,
+      0,
+      0
+    ],
+    "environmentIntensity": 1
+  },
+  "metricScaleFactor": 1.1314163,
+  "groundPlaneOffset": 1.3834634,
+  "groundPlaneColliderEnabled": true
+}

@@ -65,8 +65,10 @@ Every object is a real entity: select it to move, rotate, or scale it, switch
 it between rigid, static, and ghost bodies, or adjust the sun and shadows. Edits
 are saved to `scene.json` beside the assets.
 
-Worlds are local data and are not shipped with the repository — you generate
-your own on first run.
+The repository ships one sample world, **`demo-office`**, so a fresh clone has
+somewhere to walk around before you set up a GPU or buy any credits. It is the
+Marble world shown above, trimmed to its 100k and 500k detail levels; worlds you
+generate yourself stay local and out of git.
 
 ## How it works
 
@@ -148,12 +150,12 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). On a fresh clone
-`public/worlds/` is empty, so the app opens a create-world screen and reports
-whether the local AI backend is ready. Once worlds exist it opens the first one.
+Open [http://localhost:3000](http://localhost:3000). A fresh clone opens
+`demo-office`, the bundled sample world — walk around it with `W` `A` `S` `D`
+before installing anything. Worlds you generate appear alongside it.
 
-Generated worlds are local data and are not tracked in git — they run to
-hundreds of megabytes each and reconstruct the room in the source photo.
+Those stay out of git: they run to hundreds of megabytes each and reconstruct
+the room in whatever photo you upload.
 
 ### 3. Generate a world
 
