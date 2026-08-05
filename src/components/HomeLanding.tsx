@@ -19,7 +19,6 @@ export interface FeaturedWorld {
   slug: string
   name: string
   imageUrl?: string
-  objectCount: number
 }
 
 export function HomeLanding({ featuredWorld }: { featuredWorld?: FeaturedWorld }) {
@@ -73,8 +72,8 @@ export function HomeLanding({ featuredWorld }: { featuredWorld?: FeaturedWorld }
           </h1>
 
           <p className="mt-8 max-w-lg text-base leading-7 text-white/52 sm:text-lg sm:leading-8">
-            Turn a single frame into an explorable 3D scene—complete with separated objects,
-            physics, spatial sound, and a real scene editor. Your machine. Your worlds.
+            Turn a single frame into a space you can walk through—a Gaussian splat you can see,
+            a collision mesh you can bump into, and a scene editor. Your machine. Your worlds.
           </p>
 
           <div className="mt-9 flex flex-col gap-3 sm:flex-row">
@@ -145,7 +144,7 @@ export function HomeLanding({ featuredWorld }: { featuredWorld?: FeaturedWorld }
                   {featuredWorld?.name ?? 'Your next world'}
                 </p>
                 <p className="mt-2 text-[11px] text-white/45">
-                  {featuredWorld ? `${featuredWorld.objectCount} editable objects · physics ready` : 'Editable objects · physics ready'}
+                  Walk it in first person · physics ready
                 </p>
               </div>
               {featuredWorld && (
@@ -190,9 +189,9 @@ export function HomeLanding({ featuredWorld }: { featuredWorld?: FeaturedWorld }
 
             <div className="grid gap-px overflow-hidden rounded-2xl border border-black/10 bg-black/10 sm:grid-cols-2">
               {[
-                { Icon: Cube, title: 'Real 3D assets', body: 'Separate foreground objects into editable meshes, not flat visual tricks.' },
+                { Icon: Cube, title: 'A space, not an effect', body: 'The photo becomes a Gaussian splat with a collision mesh, so the room is solid rather than merely visible.' },
                 { Icon: CursorClick, title: 'Directable scenes', body: 'Move, rotate, scale, duplicate, and rebuild the composition in-browser.' },
-                { Icon: SpeakerHigh, title: 'A world with sound', body: 'Generated ambience and collision audio give every scene physical presence.' },
+                { Icon: SpeakerHigh, title: 'A world with sound', body: 'Generated ambience gives every scene physical presence.' },
                 { Icon: GlobeHemisphereWest, title: 'Local by design', body: 'Run the open pipeline on your own GPU. Keep your images and worlds private.' },
               ].map(({ Icon, title, body }, index) => (
                 <article key={title} className="min-h-64 bg-[#e9e5da] p-7 sm:p-8">

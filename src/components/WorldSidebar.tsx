@@ -27,6 +27,7 @@ import type { WorldEntry, WorldHoverPreview, WorldObjectAsset, WorldSceneProject
 import { type ControllerMode, useDebugStore } from '../store/debug'
 import { useAudioStore } from '../store/audio'
 import { LOCAL_TOOLS_ENABLED } from '../utils/localTools'
+import { REPO_URL } from '../utils/links'
 import { ViewerQuality } from '../types/world'
 import { AppButton } from './AppButton'
 import { ChromeThumbnail, chrome } from './AppChrome'
@@ -181,7 +182,7 @@ export function WorldSidebar({
           </AppButton>
         )}
         <a
-          href="https://github.com/neilsonnn/image-blaster"
+          href={REPO_URL}
           target="_blank"
           rel="noreferrer"
           className="inline-flex h-7 w-7 items-center justify-center rounded p-1 text-white opacity-80 transition-[background-color,opacity] hover:bg-white/10 hover:opacity-100"

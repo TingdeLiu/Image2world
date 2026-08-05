@@ -14,7 +14,6 @@ export default function Home() {
         slug: featured.slug,
         name: featured.project.display_name || featured.slug,
         imageUrl: latestWorldVersion?.plateImageUrl || featured.world?.assets.thumbnail_url || featured.sourceImageUrl,
-        objectCount: featured.objectAssets.filter((asset) => asset.complete).length,
       } : undefined}
     />
   )

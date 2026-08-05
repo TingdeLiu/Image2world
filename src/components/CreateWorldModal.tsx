@@ -14,6 +14,7 @@ import {
 } from '@phosphor-icons/react'
 import { useRouter } from 'next/navigation'
 import { AppButton } from './AppButton'
+import { MARBLE_KEYS_URL, REPO_URL } from '../utils/links'
 
 type BackendStatus = 'checking' | 'ready' | 'offline'
 type GenerationStage = 'initializing' | 'splat' | 'finalizing'
@@ -125,10 +126,12 @@ function friendlyFileName(file: File) {
 // Storage key keeps the old "imageworld" spelling on purpose: renaming it would
 // silently drop the API key users already saved. Display names use Image2World.
 const MARBLE_KEY_STORAGE = 'imageworld:marble-api-key'
-// Carries World Labs' own campaign parameters so signups arriving from this
-// modal are attributable on their side.
-const MARBLE_KEYS_URL =
-  'https://platform.worldlabs.ai/api-keys?utm_source=marble_web&utm_medium=product_cta&utm_campaign=api_cta&utm_content=help_menu_api_cta'
+// The public demo serves a prebuilt world and has neither a GPU backend nor a
+// function timeout long enough for Marble, which takes about eight minutes
+// against a 60-300 s serverless ceiling. Offering the form there would let a
+// visitor spend ~$1.20 of their own credits on a request that cannot finish, so
+// the deployment explains itself instead of failing.
+const DEMO_MODE = process.env.NEXT_PUBLIC_IMAGEWORLD_DEMO_MODE === 'true'
 
 function readStoredMarbleKey() {
   if (typeof window === 'undefined') return ''
@@ -220,8 +223,10 @@ export function CreateWorldModal({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return
     setGenerationError('')
-    setMarbleKey(readStoredMarbleKey())
-    void checkBackend()
+    if (!DEMO_MODE) {
+      setMarbleKey(readStoredMarbleKey())
+      void checkBackend()
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeCreateModal()
     }
@@ -371,14 +376,58 @@ export function CreateWorldModal({ open, onClose }: Props) {
         <div className="pr-8">
           <h2 id={modalTitleId} className="flex items-center gap-2 font-mono text-xl font-bold text-white">
             <GlobeHemisphereWestIcon className={generating ? "animate-spin text-white/80" : "text-white/60"} size={22} />
-            <span>Create New World</span>
+            <span>{DEMO_MODE ? 'Generate Your Own' : 'Create New World'}</span>
           </h2>
           <p className="mt-1.5 text-xs leading-relaxed text-white/45">
-            Turn one image into a navigable splat environment with interactive 3D objects.
+            Turn one image into a navigable splat environment you can walk through.
           </p>
         </div>
 
-        {generating ? (
+        {DEMO_MODE ? (
+          <div className="flex flex-col gap-4">
+            <div className="rounded-lg border border-sky-400/25 bg-sky-400/5 px-3 py-2.5 text-xs leading-relaxed text-sky-100/85">
+              This is a read-only demo. Generating a world writes several hundred
+              megabytes of splats and meshes to disk, so it runs on your own
+              machine rather than here.
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-white/40">
+                Run it yourself
+              </span>
+              <div className="flex flex-col gap-2.5 text-xs leading-relaxed text-white/60">
+                <p>
+                  <span className="font-semibold text-white/80">On your GPU.</span>{' '}
+                  Clone the repository and start the local pipeline — free, about
+                  16–43 seconds per world, and it reconstructs what the camera saw.
+                </p>
+                <p>
+                  <span className="font-semibold text-white/80">Or in the cloud.</span>{' '}
+                  Add your own Marble API key to get a world that is closed on
+                  every side, like the one you are standing in. Billed to your key,
+                  roughly $1.20 each.
+                </p>
+              </div>
+            </div>
+
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 flex items-center justify-center gap-1.5 rounded bg-white px-4 py-2.5 font-mono text-xs font-semibold text-black transition hover:bg-white/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              Get it on GitHub
+              <ArrowSquareOut size={13} weight="bold" aria-hidden />
+            </a>
+
+            <p className="text-center text-[10px] font-mono leading-relaxed text-white/35">
+              Close this and press <span className="text-white/55">W</span>{' '}
+              <span className="text-white/55">A</span>{' '}
+              <span className="text-white/55">S</span>{' '}
+              <span className="text-white/55">D</span> to keep exploring.
+            </p>
+          </div>
+        ) : generating ? (
           <div className="flex flex-col gap-6 py-5" aria-live="polite">
             <div className="flex items-center justify-between gap-4 font-mono text-[10px] uppercase tracking-[0.18em] text-white/35">
               <span>Pipeline / {generationProgress.stage}</span>

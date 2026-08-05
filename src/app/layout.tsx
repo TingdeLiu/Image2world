@@ -8,7 +8,7 @@ export const metadata: Metadata = {
     default: 'Image2World — Step Inside Your Image',
     template: '%s · Image2World',
   },
-  description: 'Turn one image into an explorable, editable 3D world with local AI, physics, separated objects, and spatial sound.',
+  description: 'Turn one image into a navigable 3D world — a Gaussian splat with a collision mesh you can walk through, generated on your own GPU or in the cloud.',
   applicationName: 'Image2World',
   keywords: [
     'image to 3D',
