@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import NextImage from 'next/image'
 import {
+  ArrowSquareOut,
   CheckCircle,
   GlobeHemisphereWest as GlobeHemisphereWestIcon,
   Spinner,
@@ -124,7 +125,10 @@ function friendlyFileName(file: File) {
 // Storage key keeps the old "imageworld" spelling on purpose: renaming it would
 // silently drop the API key users already saved. Display names use Image2World.
 const MARBLE_KEY_STORAGE = 'imageworld:marble-api-key'
-const MARBLE_KEYS_URL = 'https://platform.worldlabs.ai/api-keys'
+// Carries World Labs' own campaign parameters so signups arriving from this
+// modal are attributable on their side.
+const MARBLE_KEYS_URL =
+  'https://platform.worldlabs.ai/api-keys?utm_source=marble_web&utm_medium=product_cta&utm_campaign=api_cta&utm_content=help_menu_api_cta'
 
 function readStoredMarbleKey() {
   if (typeof window === 'undefined') return ''
@@ -512,9 +516,10 @@ export function CreateWorldModal({ open, onClose }: Props) {
                   href={MARBLE_KEYS_URL}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="font-mono text-[10px] text-sky-300/70 underline decoration-dotted underline-offset-2 hover:text-sky-200"
+                  className="flex flex-shrink-0 items-center gap-1 rounded border border-sky-400/30 bg-sky-400/[0.07] px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-sky-200/90 transition hover:border-sky-300/50 hover:bg-sky-400/15 hover:text-sky-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
                 >
-                  Get a key ↗
+                  Get a key
+                  <ArrowSquareOut size={11} weight="bold" aria-hidden />
                 </a>
               </div>
               <input
