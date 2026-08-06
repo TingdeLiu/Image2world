@@ -4,8 +4,11 @@
 
 ### One image in. A navigable 3D world out.
 
-Build a local, interactive 3D scene from a single image — with a Gaussian-splat
-environment, editable 3D objects, physics, and generated spatial audio.
+<img src="./docs/media/demo-loop.webp" alt="A source photo dissolves into the 3D scene rebuilt from it; walking forward and turning around reveals two doors and a corridor the photo never contained" width="820">
+
+Build a local, interactive 3D scene from a single image — a Gaussian-splat
+environment you can walk through, with physics, a scene editor, and generated
+ambience.
 
 [中文使用指南](./USAGE.md) · [AI backend setup](./backend/README.md) · [USD export](./scripts/usd-export/README.md)
 
@@ -14,12 +17,6 @@ environment, editable 3D objects, physics, and generated spatial audio.
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)
 ![Local-first](https://img.shields.io/badge/inference-local--first-8B5CF6)
 ![MIT source license](https://img.shields.io/badge/source-MIT-22C55E)
-
-</div>
-
-![Image2World turns a source photo into a navigable Gaussian-splat scene](./docs/media/image2world-hero.png)
-
-<div align="center">
 
 **The world is closed on every side.** Turning around inside it shows a corridor
 and a glass partition that the source photo never captured — a generative world
