@@ -19,15 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE ON BUNDLED / DOWNLOADED MODELS
-This MIT license covers ONLY the ImageWorld source code in this repository.
-The AI models downloaded at runtime are governed by their own licenses, e.g.:
-  - SAM 2 / SAM 3 (Meta)        : Meta's SAM license (SAM 3 is gated; commercial
-                                  use is restricted — review before any SaaS use)
-  - TripoSR (Stability AI)      : Apache-2.0 / MIT (per model card)
-  - AudioLDM (CVSSP)            : check the model card on Hugging Face
-  - SHARP (Apple)               : Apple ML Research license
-Review each model's license before commercial deployment.

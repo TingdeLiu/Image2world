@@ -397,8 +397,9 @@ repository — it helps other builders discover the project.
 
 Image2World source code is released under the [MIT License](./LICENSE).
 Downloaded or bundled model weights are governed by their respective upstream
-licenses. Review the SAM, TripoSR, AudioLDM, and SHARP terms before commercial
-deployment, and World Labs' terms if you generate through Marble.
+licenses — [`NOTICE`](./NOTICE) lists which model each pipeline actually uses
+and where its terms live. Review them before commercial deployment, including
+World Labs' terms if you generate through Marble.
 
 ## Acknowledgements
 

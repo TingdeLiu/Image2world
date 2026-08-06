@@ -1,0 +1,38 @@
+Image2World
+Copyright (c) 2026 Tyndall Labs
+
+The MIT license in LICENSE covers ONLY the source code in this repository.
+Models and services used for generation carry their own terms, and this file
+is not legal advice — read the upstream license before any commercial use.
+
+WHAT THE GENERATION PIPELINE ACTUALLY USES
+
+  SHARP (Apple Machine Learning Research)
+      Local single-image reconstruction. Apple ML Research license.
+      Downloaded during backend setup.
+
+  Marble (World Labs)
+      Optional cloud generation, called with the user's own API key.
+      Governed by World Labs' terms of service; usage is billed to the
+      key holder, not to this project.
+
+RETIRED, BUT STILL PRESENT AS BACKEND ENDPOINTS
+
+The foreground-object pipeline was removed from generation. Its endpoints
+remain in backend/server.py and load lazily, so these models are only
+fetched or run if something calls them directly.
+
+  SAM 2 / SAM 3 (Meta)      Meta's SAM license. SAM 3 weights are gated and
+                            commercial use is restricted — this needs a legal
+                            read before any hosted offering.
+  TripoSR (Stability AI)    MIT, per the model card.
+  LaMa (Samsung AI)         Apache-2.0.
+  AudioLDM (CVSSP)          Check the current model card on Hugging Face.
+
+OTHER COMPONENTS
+
+  usd-convert-gsplat (NVIDIA Omniverse)
+      Used by the USD exporter. Apache-2.0 and CC-BY-4.0.
+
+Runtime dependencies (Three.js, React Three Fiber, Spark, Rapier, Next.js,
+FastAPI, PyTorch) carry their own licenses; see their package metadata.
