@@ -37,13 +37,24 @@ Quote measurements only against the world they were measured on. The 0/24 and
 
 ## Shot list — README loop (7.5 s)
 
+As shipped in `docs/media/demo-loop.webp` (8.2 s):
+
 | Time | Shot | Why |
 | --- | --- | --- |
-| 0.0–1.2 s | The source photo, held still, filling the frame | Viewer files it as "a photo" |
-| 1.2–1.5 s | Hard cut to the 3D scene at a near-identical angle | Nothing appears to happen — the doubt starts here |
-| 1.5–3.6 s | Walk forward. Parallax opens up | "That was not a photo" |
-| 3.6–7.0 s | Stop, then turn 180° slowly | The room continues where the photo ended |
-| 7.0–7.5 s | Hold on the reveal, cut back to frame 1 | Loop reads as deliberate, not truncated |
+| 0.0–1.0 s | The source photo, held still, filling the frame | Viewer files it as "a photo" |
+| 1.0–1.6 s | Crossfade into the 3D scene | The room appears to gain depth rather than be replaced |
+| 1.6–3.7 s | Walk forward. Parallax opens up | "That was not a photo" |
+| 3.7–4.2 s | Stop | Lets the turn read as deliberate |
+| 4.2–7.6 s | Turn 180° slowly | The room continues where the photo ended |
+| 7.6–8.2 s | Hold on the reveal, loop back to frame 1 | Reads as finished, not truncated |
+
+**Crossfade, not a hard cut** — this was tried the other way first. A hard cut
+only works if the 3D opening frame matches the photo, and it does not: the
+spawn point is derived from the collider bounding box, not the original camera
+pose, so the viewer starts further into the room with a narrower field of view.
+Cut hard and it reads as two unrelated shots. Dissolved, the furniture roughly
+aligns and the transition sells the actual claim — that the photo *became* the
+space.
 
 Turn *slowly*. A fast whip-pan reads as a camera trick; a slow turn lets the
 viewer verify the geometry is really there. This is the whole video.
@@ -142,9 +153,10 @@ Pixels-per-degree depends on the sensitivity setting, so measure once:
 await cam.look({ x: 200, ms: 1000 })
 ```
 
-Eyeball how far that turned, then scale. If 200 px turned roughly 45°, a 180°
-turn is about 800 px. Store the number — every take needs the same value or the
-loop will not match.
+Eyeball how far that turned, then scale. **At the default sensitivity, 1400 px
+is very close to 180°** — that is the value the shipped loop uses. 800 px only
+reached about 100°, which lands on a blank wall and wastes the reveal. Store the
+number: every take needs the same value or the loop will not match.
 
 ### The README loop, as a sequence
 
@@ -191,28 +203,46 @@ Trim first, convert second. `-ss` before `-i` seeks fast:
 ffmpeg -ss 00:00:01.5 -i raw.mp4 -t 7.5 -c copy loop-trimmed.mp4
 ```
 
-GIF via a generated palette — the naive one-liner produces banded, oversized
-output:
+**Use WebP, not GIF.** This was measured on the real loop, and it is not close:
+
+| Format | Settings | Size |
+| --- | --- | --- |
+| GIF | 24 fps, 960 px | 31 MB |
+| GIF | 20 fps, 800 px | 19 MB |
+| **WebP** | **24 fps, 960 px, q60** | **2.2 MB** |
+
+A moving splat scene defeats GIF entirely. Every pixel changes every frame, so
+inter-frame compression finds nothing to reuse, and 256 colours cannot hold a
+photographic interior — even the degraded 19 MB variant is unshippable.
 
 ```bash
-ffmpeg -i loop-trimmed.mp4 -vf "fps=24,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff" -y palette.png
+ffmpeg -i loop-trimmed.mp4 -vf "fps=24,scale=960:-1:flags=lanczos" -loop 0 -q:v 60 -compression_level 6 -y docs/media/demo-loop.webp
 ```
+
+GitHub serves animated WebP untouched — verified: `content-type: image/webp`,
+full byte count, autoplaying because of `-loop 0`. Reference it with an `<img>`
+tag so the width can be pinned:
+
+```html
+<img src="./docs/media/demo-loop.webp" alt="…" width="820">
+```
+
+`ffprobe` reports nothing useful for animated WebP (`image data not found`,
+`width=0`). That is a demuxer limitation, not a broken file. Check frames with
+Pillow instead:
 
 ```bash
-ffmpeg -i loop-trimmed.mp4 -i palette.png -lavfi "fps=24,scale=960:-1:flags=lanczos,paletteuse=dither=bayer:bayer_scale=3" -y docs/media/demo-loop.gif
+python -c "from PIL import Image; im=Image.open('docs/media/demo-loop.webp'); print(im.n_frames, im.size, im.is_animated)"
 ```
 
-Target **under 5 MB**. If it runs over, drop to `fps=20`, then `scale=800:-1`,
-in that order — resolution reads worse than frame rate on a slow pan.
-
-Animated WebP is roughly a third the size and GitHub autoplays it too, but GIF
-degrades more predictably across other markdown renderers:
+Also export an MP4. X, LinkedIn, and Devpost want a video file, and some
+markdown renderers outside GitHub will not animate WebP:
 
 ```bash
-ffmpeg -i loop-trimmed.mp4 -vf "fps=24,scale=960:-1:flags=lanczos" -loop 0 -q:v 70 -y docs/media/demo-loop.webp
+ffmpeg -i loop-trimmed.mp4 -c:v libx264 -crf 23 -preset slow -pix_fmt yuv420p -movflags +faststart -y docs/media/demo-loop.mp4
 ```
 
-For the long video, keep MP4 and upload it; do not turn 100 seconds into a GIF.
+For the long video, keep MP4 and upload it; never turn 100 seconds into a GIF.
 
 ## Placing it
 
