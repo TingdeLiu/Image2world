@@ -21,6 +21,8 @@ export interface CharacterControllerHandle {
 interface CharacterControllerProps {
   /** Floor position [x, z] the scene wants the player to start at. */
   spawnPoint?: [number, number]
+  initialYaw?: number
+  initialPitch?: number
 }
 
 const SPEED = 4
@@ -39,7 +41,7 @@ const _move = new THREE.Vector3()
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ')
 
 export const CharacterController = forwardRef<CharacterControllerHandle, CharacterControllerProps>(
-  function CharacterController({ spawnPoint }, ref) {
+  function CharacterController({ spawnPoint, initialYaw = DEFAULT_YAW, initialPitch = 0 }, ref) {
   const bodyRef = useRef<React.ComponentRef<typeof RigidBody>>(null)
   const { camera, gl } = useThree()
   const mouseSensitivity = useDebugStore((s) => s.flyMouseSensitivity)
@@ -47,10 +49,10 @@ export const CharacterController = forwardRef<CharacterControllerHandle, Charact
 
   const keys = useRef(new Set<string>())
   const jumpQueued = useRef(false)
-  const rawYaw = useRef(DEFAULT_YAW)
-  const rawPitch = useRef(0)
-  const smoothYaw = useRef(DEFAULT_YAW)
-  const smoothPitch = useRef(0)
+  const rawYaw = useRef(initialYaw)
+  const rawPitch = useRef(initialPitch)
+  const smoothYaw = useRef(initialYaw)
+  const smoothPitch = useRef(initialPitch)
   const touchLook = useRef<{ id: number; x: number; y: number } | null>(null)
   const touchMove = useRef<{ id: number; x: number; y: number } | null>(null)
   const [joystickPos, setJoystickPos] = useState({ x: 0, y: 0 })
@@ -61,12 +63,12 @@ export const CharacterController = forwardRef<CharacterControllerHandle, Charact
       bodyRef.current.setTranslation(characterBodySpawn(spawnPoint), true)
       bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true)
       bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true)
-      rawYaw.current = DEFAULT_YAW
-      rawPitch.current = 0
-      smoothYaw.current = DEFAULT_YAW
-      smoothPitch.current = 0
+      rawYaw.current = initialYaw
+      rawPitch.current = initialPitch
+      smoothYaw.current = initialYaw
+      smoothPitch.current = initialPitch
       keys.current.clear()
-      camera.quaternion.setFromEuler(_euler.set(0, DEFAULT_YAW, 0))
+      camera.quaternion.setFromEuler(_euler.set(initialPitch, initialYaw, 0))
     },
   }))
 

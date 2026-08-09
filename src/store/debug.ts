@@ -98,7 +98,9 @@ export const useDebugStore = create<DebugStore>()(
       setControllerMode: (controllerMode) => set({ controllerMode }),
       flyMouseSensitivity: 0.003,
       setFlyMouseSensitivity: (flyMouseSensitivity) => set({ flyMouseSensitivity }),
-      dofEnabled: true,
+      // Reconstruction splats are easiest to judge and navigate without a
+      // synthetic focus plane. Users can still enable the cinematic effect.
+      dofEnabled: false,
       setDofEnabled: (dofEnabled) => set({ dofEnabled }),
       focalDistance: 5,
       setFocalDistance: (focalDistance) => set({ focalDistance }),
@@ -120,7 +122,7 @@ export const useDebugStore = create<DebugStore>()(
       setChromaticEnabled: (chromaticEnabled) => set({ chromaticEnabled }),
       chromaticOffset: 0.0008,
       setChromaticOffset: (chromaticOffset) => set({ chromaticOffset }),
-      motionBlurEnabled: true,
+      motionBlurEnabled: false,
       setMotionBlurEnabled: (motionBlurEnabled) => set({ motionBlurEnabled }),
       motionBlurStrength: 0.3,
       setMotionBlurStrength: (motionBlurStrength) => set({ motionBlurStrength }),
@@ -137,7 +139,7 @@ export const useDebugStore = create<DebugStore>()(
       // Deliberately still "imageworld": renaming the key would discard every
       // saved setting on upgrade. The product name is Image2World.
       name: 'imageworld-debug',
-      version: 12,
+      version: 13,
       skipHydration: true,
       migrate: (persisted, version) => {
         if (!persisted || typeof persisted !== 'object') return persisted
@@ -149,6 +151,12 @@ export const useDebugStore = create<DebugStore>()(
         // however the default changes. Reset it once; anyone who actually wants
         // fly only has to pick it again.
         if (version < 12) state.controllerMode = 'fps'
+        // Older defaults made newly reconstructed splats look smeared while
+        // the camera settled. Migrate once to the neutral inspection preset.
+        if (version < 13) {
+          state.dofEnabled = false
+          state.motionBlurEnabled = false
+        }
         delete state.hotReloadEnabled
         return state
       },

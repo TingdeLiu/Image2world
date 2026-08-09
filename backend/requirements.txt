@@ -14,3 +14,9 @@ einops
 simple-lama-inpainting
 huggingface_hub
 pytest
+# Multi-view reconstruction (backend/tools/multiview_*.py). The PyPI wheel is
+# built without CUDA, so structure from motion runs on the CPU.
+pycolmap
+plyfile
+scikit-image
+fast-simplification

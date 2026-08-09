@@ -18,6 +18,13 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from simple_lama_inpainting import SimpleLama
 
+try:  # package import under pytest, script import under `python backend/server.py`
+    from .gpu_scheduler import run_with_gpu_lock
+    from .reconstruction_jobs import router as reconstruction_jobs_router
+except ImportError:  # pragma: no cover - exercised by the production entrypoint
+    from gpu_scheduler import run_with_gpu_lock
+    from reconstruction_jobs import router as reconstruction_jobs_router
+
 # Initialize FastAPI app
 app = FastAPI(title="ImageWorld Local AI Inference Backend")
 
@@ -42,6 +49,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(reconstruction_jobs_router)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
@@ -85,7 +93,7 @@ HEAVY_JOB_LOCK = asyncio.Semaphore(1)
 async def run_heavy(fn, *args, **kwargs):
     """Run one blocking GPU/compute job off the event loop, serialised."""
     async with HEAVY_JOB_LOCK:
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        return await asyncio.to_thread(run_with_gpu_lock, fn, *args, **kwargs)
 
 
 async def run_off_loop(fn, *args, **kwargs):
@@ -943,6 +951,8 @@ async def splat_to_collider(
     voxel_size: float = Form(0.05),
     target_faces: int = Form(60000),
     max_distance: float = Form(15.0),
+    flip_y: bool = Form(True),
+    rotation_x: float | None = Form(None),
 ):
     """
     Derive a collision mesh + ground calibration from a Gaussian-splat PLY.
@@ -988,23 +998,43 @@ async def splat_to_collider(
                 )
                 glb_path = Path(td) / "collider.glb"
                 built.export(glb_path)
-                return built, detect_ground_offset(built), glb_path.read_bytes()
+                if rotation_x is None:
+                    ground_offset = detect_ground_offset(built, flip_y=flip_y)
+                    viewer_mesh = None
+                else:
+                    import trimesh
 
-        mesh, ground_offset, glb_bytes = await run_heavy(work)
+                    viewer_mesh = built.copy()
+                    viewer_mesh.apply_transform(
+                        trimesh.transformations.rotation_matrix(rotation_x, [1, 0, 0])
+                    )
+                    ground_offset = detect_ground_offset(viewer_mesh, flip_y=False)
+                return built, viewer_mesh, ground_offset, glb_path.read_bytes()
+
+        mesh, viewer_mesh, ground_offset, glb_bytes = await run_heavy(work)
         size = mesh.bounds[1] - mesh.bounds[0]
 
         # Report the extent in viewer space so the caller can place the camera
-        # inside the room. SHARP reconstructs from the photographer's viewpoint,
-        # which is usually *outside* the space being photographed -- spawning at
-        # the origin drops the player behind all the geometry, facing it from
-        # the void. Viewer space flips Y and Z (the manifest's flip_y) and lifts
-        # the floor to y=0.
+        # inside the room. SHARP output flips Y/Z in the viewer, while
+        # Nerfstudio exports are already Y-up and opt out with flip_y=false.
         offset = ground_offset or 0.0
         lo, hi = mesh.bounds
-        bounds_viewer = {
-            "min": [float(lo[0]), float(-hi[1] + offset), float(-hi[2])],
-            "max": [float(hi[0]), float(-lo[1] + offset), float(-lo[2])],
-        }
+        if viewer_mesh is not None:
+            viewer_lo, viewer_hi = viewer_mesh.bounds
+            bounds_viewer = {
+                "min": [float(viewer_lo[0]), float(viewer_lo[1] + offset), float(viewer_lo[2])],
+                "max": [float(viewer_hi[0]), float(viewer_hi[1] + offset), float(viewer_hi[2])],
+            }
+        elif flip_y:
+            bounds_viewer = {
+                "min": [float(lo[0]), float(-hi[1] + offset), float(-hi[2])],
+                "max": [float(hi[0]), float(-lo[1] + offset), float(-lo[2])],
+            }
+        else:
+            bounds_viewer = {
+                "min": [float(lo[0]), float(lo[1] + offset), float(lo[2])],
+                "max": [float(hi[0]), float(hi[1] + offset), float(hi[2])],
+            }
 
         print(f"Collider built: {len(mesh.faces)} faces, room {size[0]:.1f}x{size[1]:.1f}x{size[2]:.1f} m")
         return {

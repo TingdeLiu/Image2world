@@ -12,6 +12,7 @@ export interface WorldAssets {
       metric_scale_factor: number
       ground_plane_offset: number
       flip_y?: boolean
+      rotation_x?: number
     }
   }
   thumbnail_url: string
@@ -89,6 +90,12 @@ export interface WorldSceneProject {
    * which fall back to the origin.
    */
   spawnPoint?: [number, number]
+  /** Exact initial camera pose for reconstructed video worlds. */
+  spawnPosition?: Vec3Tuple
+  /** Initial camera orientation in Three.js YXZ Euler radians. */
+  spawnYaw?: number
+  spawnPitch?: number
+  defaultController?: 'fly' | 'fps'
 }
 
 export interface WorldVersion {
