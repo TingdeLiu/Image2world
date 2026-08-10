@@ -77,6 +77,31 @@ describe('sanitizePlacementProject', () => {
     }
   })
 
+  it('keeps finite initial camera angles and drops malformed values', () => {
+    const result = sanitizePlacementProject({
+      ...minimalProject,
+      spawnPosition: [1, 2, 3],
+      spawnYaw: 1.2,
+      spawnPitch: -0.4,
+      defaultController: 'fly',
+    })
+    assert.deepEqual(result?.spawnPosition, [1, 2, 3])
+    assert.equal(result?.spawnYaw, 1.2)
+    assert.equal(result?.spawnPitch, -0.4)
+    assert.equal(result?.defaultController, 'fly')
+    const malformed = sanitizePlacementProject({
+      ...minimalProject,
+      spawnPosition: [1, 2],
+      spawnYaw: '1',
+      spawnPitch: Infinity,
+      defaultController: 'walk',
+    })
+    assert.equal(malformed?.spawnPosition, undefined)
+    assert.equal(malformed?.spawnYaw, undefined)
+    assert.equal(malformed?.spawnPitch, undefined)
+    assert.equal(malformed?.defaultController, undefined)
+  })
+
   it('clamps shadow catcher opacity into range instead of discarding it', () => {
     const opacity = (shadowCatcherOpacity: unknown) =>
       sanitizePlacementProject({ ...minimalProject, shadowCatcherOpacity })?.shadowCatcherOpacity

@@ -17,7 +17,8 @@ import { AppButton } from './AppButton'
 import { MARBLE_KEYS_URL, REPO_URL } from '../utils/links'
 
 type BackendStatus = 'checking' | 'ready' | 'offline'
-type GenerationStage = 'initializing' | 'splat' | 'finalizing'
+type GenerationStage = 'initializing' | 'uploading' | 'sfm' | 'training' | 'exporting' | 'splat' | 'finalizing'
+type VideoQuality = 'preview' | 'standard' | 'quality'
 
 interface GenerationUiProgress {
   stage: GenerationStage
@@ -47,15 +48,41 @@ const INITIAL_GENERATION_PROGRESS: GenerationUiProgress = {
 }
 const GENERATION_STAGE_ORDER: GenerationStage[] = [
   'initializing',
+  'uploading',
+  'sfm',
+  'training',
+  'exporting',
   'splat',
   'finalizing',
 ]
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+const MAX_VIDEO_BYTES = 5 * 1024 * 1024 * 1024
 const ACCEPTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
+const ACCEPTED_VIDEO_TYPES = new Set([
+  'video/mp4',
+  'video/quicktime',
+  'video/x-matroska',
+  'video/webm',
+  'video/x-msvideo',
+  'video/x-m4v',
+])
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'])
+const LOCAL_BACKEND_URL = (
+  process.env.NEXT_PUBLIC_IMAGEWORLD_BACKEND_URL || 'http://localhost:8000'
+).replace(/\/+$/, '')
 
-function validateImage(file: File) {
-  if (!ACCEPTED_IMAGE_TYPES.has(file.type)) return 'Choose a PNG, JPG, or WEBP image.'
+function isVideoFile(file: File) {
+  const extension = file.name.split('.').pop()?.toLowerCase() || ''
+  return ACCEPTED_VIDEO_TYPES.has(file.type) || file.type.startsWith('video/') || VIDEO_EXTENSIONS.has(extension)
+}
+
+function validateSource(file: File) {
+  if (isVideoFile(file)) {
+    if (file.size > MAX_VIDEO_BYTES) return 'Video must be smaller than 5 GB.'
+    return ''
+  }
+  if (!ACCEPTED_IMAGE_TYPES.has(file.type)) return 'Choose a PNG, JPG, WEBP, MP4, MOV, MKV, or WEBM file.'
   if (file.size > MAX_IMAGE_BYTES) return 'Image must be smaller than 10 MB.'
   return ''
 }
@@ -63,11 +90,56 @@ function validateImage(file: File) {
 async function responseErrorMessage(response: Response) {
   const contentType = response.headers.get('content-type') || ''
   if (contentType.includes('application/json')) {
-    const payload = await response.json() as { error?: { message?: string } }
-    return payload.error?.message || `Generation request failed with HTTP ${response.status}.`
+    const payload = await response.json() as { error?: { message?: string } | string; detail?: string }
+    return (typeof payload.error === 'string' ? payload.error : payload.error?.message)
+      || payload.detail
+      || `Generation request failed with HTTP ${response.status}.`
   }
   const message = (await response.text()).trim()
   return message || `Generation request failed with HTTP ${response.status}.`
+}
+
+interface ReconstructionJob {
+  id: string
+  status: 'uploading' | 'queued' | 'running' | 'complete' | 'failed' | 'canceled' | 'canceling' | 'interrupted'
+  stage: string
+  progress: number
+  message: string
+  detail?: string
+  error?: string
+}
+
+function abortableDelay(milliseconds: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const timeout = window.setTimeout(() => {
+      signal.removeEventListener('abort', abort)
+      resolve()
+    }, milliseconds)
+    const abort = () => {
+      window.clearTimeout(timeout)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    signal.addEventListener('abort', abort, { once: true })
+  })
+}
+
+function videoProgress(job: ReconstructionJob): GenerationUiProgress {
+  const supported = new Set<GenerationStage>(['uploading', 'sfm', 'training', 'exporting', 'finalizing'])
+  const stage = supported.has(job.stage as GenerationStage)
+    ? job.stage as GenerationStage
+    : job.status === 'queued'
+      ? 'initializing'
+      : 'training'
+  return {
+    stage,
+    progress: Math.min(98, Math.max(1, Math.round(job.progress || 1))),
+    message: job.message || 'Reconstructing video',
+    detail: job.detail,
+  }
 }
 
 async function readGenerationStream(
@@ -170,7 +242,10 @@ export function CreateWorldModal({ open, onClose }: Props) {
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking')
   const [backendMessage, setBackendMessage] = useState('')
   const [selectedFileUrl, setSelectedFileUrl] = useState('')
+  const [videoQuality, setVideoQuality] = useState<VideoQuality>('standard')
+  const [cameraHeight, setCameraHeight] = useState(1.6)
   const generationAbortRef = useRef<AbortController | null>(null)
+  const activeVideoJobRef = useRef<string | null>(null)
   const modalTitleId = useId()
 
   // The key is deliberately left out of the reset: it is a setting, not part of
@@ -181,9 +256,13 @@ export function CreateWorldModal({ open, onClose }: Props) {
     setGenerationError('')
     setGenerationProgress(INITIAL_GENERATION_PROGRESS)
     setFileError('')
+    setVideoQuality('standard')
+    setCameraHeight(1.6)
+    activeVideoJobRef.current = null
   }, [])
 
-  const usingMarble = marbleKey.trim().length > 0
+  const selectedVideo = selectedFile ? isVideoFile(selectedFile) : false
+  const usingMarble = marbleKey.trim().length > 0 && !selectedVideo
 
   const closeCreateModal = useCallback(() => {
     if (generating) return
@@ -238,8 +317,8 @@ export function CreateWorldModal({ open, onClose }: Props) {
     generationAbortRef.current?.abort()
   }, [])
 
-  const chooseImageFile = (file: File) => {
-    const error = validateImage(file)
+  const chooseSourceFile = (file: File) => {
+    const error = validateSource(file)
     setFileError(error)
     setGenerationError('')
     if (error) {
@@ -248,6 +327,58 @@ export function CreateWorldModal({ open, onClose }: Props) {
     }
     setSelectedFile(file)
     if (!worldName) setWorldName(friendlyFileName(file))
+  }
+
+  const runVideoReconstruction = async (
+    file: File,
+    name: string,
+    signal: AbortSignal,
+  ) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('name', name)
+    formData.append('quality', videoQuality)
+    formData.append('camera_height', String(cameraHeight))
+    const createdResponse = await fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs`, {
+      method: 'POST',
+      body: formData,
+      signal,
+    })
+    if (!createdResponse.ok) throw new Error(await responseErrorMessage(createdResponse))
+    let job = await createdResponse.json() as ReconstructionJob
+    activeVideoJobRef.current = job.id
+    setGenerationProgress(videoProgress(job))
+
+    while (job.status !== 'complete') {
+      if (['failed', 'canceled', 'interrupted'].includes(job.status)) {
+        throw new Error(job.error || job.message || `Reconstruction ${job.status}.`)
+      }
+      await abortableDelay(2_000, signal)
+      const statusResponse = await fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${job.id}`, {
+        cache: 'no-store',
+        signal,
+      })
+      if (!statusResponse.ok) throw new Error(await responseErrorMessage(statusResponse))
+      job = await statusResponse.json() as ReconstructionJob
+      setGenerationProgress(videoProgress(job))
+    }
+
+    setGenerationProgress({
+      stage: 'finalizing',
+      progress: 98,
+      message: 'Publishing reconstructed world',
+      detail: 'Building LODs, collision geometry, and scene metadata',
+    })
+    const finalResponse = await fetch('/api/video-reconstruction/finalize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: job.id, name }),
+      signal,
+    })
+    if (!finalResponse.ok) throw new Error(await responseErrorMessage(finalResponse))
+    const finalized = await finalResponse.json() as { slug?: string }
+    if (!finalized.slug) throw new Error('World publisher returned no world identifier.')
+    return finalized.slug
   }
 
   const handleCreateWorld = async (e: React.FormEvent) => {
@@ -270,8 +401,10 @@ export function CreateWorldModal({ open, onClose }: Props) {
     setGenerationProgress({
       stage: 'initializing',
       progress: 1,
-      message: 'Uploading source image',
-      detail: usingMarble
+      message: selectedVideo ? 'Uploading source video' : 'Uploading source image',
+      detail: selectedVideo
+        ? 'Streaming the video to the persistent local reconstruction queue'
+        : usingMarble
         ? 'Sending the photo to World Labs Marble'
         : 'Opening a live connection to the local pipeline',
     })
@@ -279,22 +412,27 @@ export function CreateWorldModal({ open, onClose }: Props) {
     generationAbortRef.current = generationController
 
     try {
-      const formData = new FormData()
-      formData.append('file', selectedFile)
-      formData.append('name', worldName)
-      if (usingMarble) formData.append('marbleApiKey', marbleKey.trim())
+      let slug: string
+      if (selectedVideo) {
+        slug = await runVideoReconstruction(
+          selectedFile,
+          worldName.trim(),
+          generationController.signal,
+        )
+      } else {
+        const formData = new FormData()
+        formData.append('file', selectedFile)
+        formData.append('name', worldName)
+        if (usingMarble) formData.append('marbleApiKey', marbleKey.trim())
 
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        body: formData,
-        signal: generationController.signal,
-      })
-
-      if (!res.ok) {
-        throw new Error(await responseErrorMessage(res))
+        const res = await fetch('/api/generate', {
+          method: 'POST',
+          body: formData,
+          signal: generationController.signal,
+        })
+        if (!res.ok) throw new Error(await responseErrorMessage(res))
+        slug = await readGenerationStream(res, setGenerationProgress)
       }
-
-      const slug = await readGenerationStream(res, setGenerationProgress)
       setGenerationProgress({
         stage: 'finalizing',
         progress: 100,
@@ -316,6 +454,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
       if (generationAbortRef.current === generationController) {
         generationAbortRef.current = null
       }
+      activeVideoJobRef.current = null
       setGenerating(false)
     }
   }
@@ -326,7 +465,11 @@ export function CreateWorldModal({ open, onClose }: Props) {
       message: 'Canceling generation',
       detail: 'Stopping the active backend stage and cleaning temporary files',
     }))
+    const jobId = activeVideoJobRef.current
     generationAbortRef.current?.abort()
+    if (jobId) {
+      void fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${jobId}`, { method: 'DELETE' })
+    }
   }
 
   const handleDrag = (e: React.DragEvent) => {
@@ -344,13 +487,13 @@ export function CreateWorldModal({ open, onClose }: Props) {
     e.stopPropagation()
     setDragActive(false)
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      chooseImageFile(e.dataTransfer.files[0])
+      chooseSourceFile(e.dataTransfer.files[0])
     }
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      chooseImageFile(e.target.files[0])
+      chooseSourceFile(e.target.files[0])
     }
   }
 
@@ -379,7 +522,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
             <span>{DEMO_MODE ? 'Generate Your Own' : 'Create New World'}</span>
           </h2>
           <p className="mt-1.5 text-xs leading-relaxed text-white/45">
-            Turn one image into a navigable splat environment you can walk through.
+            Turn an image or a walkthrough video into a navigable Gaussian world.
           </p>
         </div>
 
@@ -464,7 +607,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
                   style={{ width: `${generationProgress.progress}%` }}
                 />
               </div>
-              <div className="mt-3 grid grid-cols-6 gap-1">
+              <div className="mt-3 grid grid-cols-7 gap-1">
                 {GENERATION_STAGE_ORDER.map((stage, index) => {
                   const activeIndex = GENERATION_STAGE_ORDER.indexOf(generationProgress.stage)
                   const reached = index <= activeIndex
@@ -574,15 +717,18 @@ export function CreateWorldModal({ open, onClose }: Props) {
               <input
                 id="marble-key"
                 type="password"
+                disabled={selectedVideo}
                 autoComplete="off"
                 spellCheck={false}
                 value={marbleKey}
                 onChange={(e) => setMarbleKey(e.target.value)}
                 placeholder="Leave empty to use the local GPU pipeline"
-                className="bg-zinc-900 border border-white/10 focus:border-white/30 rounded px-3 py-2 text-white placeholder-white/20 font-mono text-sm outline-none transition-colors"
+                className="bg-zinc-900 border border-white/10 focus:border-white/30 rounded px-3 py-2 text-white placeholder-white/20 font-mono text-sm outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-40"
               />
               <span className="text-[10px] font-mono leading-relaxed text-white/40">
-                {usingMarble
+                {selectedVideo
+                  ? 'Walkthrough videos always use the local COLMAP + Nerfstudio Splatfacto pipeline.'
+                  : usingMarble
                   ? 'Stored in this browser only. Marble builds a fully enclosed world you can walk around in — billed to your account (~1500 credits per world).'
                   : 'Without a key, generation runs on your local GPU: free and fast, but only reconstructs what the camera saw, so the space is open behind you.'}
               </span>
@@ -590,7 +736,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
 
             <div className="flex flex-col gap-1.5">
               <span className="text-xs font-mono font-semibold text-white/60 uppercase tracking-wider">
-                Source Image
+                Source Image or Video
               </span>
               <div
                 onDragEnter={handleDrag}
@@ -606,7 +752,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
                 }}
                 role="button"
                 tabIndex={0}
-                aria-label={selectedFile ? `Change source image, currently ${selectedFile.name}` : 'Choose source image'}
+                aria-label={selectedFile ? `Change source media, currently ${selectedFile.name}` : 'Choose source image or video'}
                 className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2 min-h-[140px] ${
                   dragActive
                     ? 'border-white bg-white/5'
@@ -618,21 +764,32 @@ export function CreateWorldModal({ open, onClose }: Props) {
                 <input
                   id="file-upload"
                   type="file"
-                  accept="image/*"
+                  accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo,video/x-m4v,.mkv,.m4v"
                   className="hidden"
                   onChange={handleFileChange}
                 />
                 {selectedFile ? (
                   <div className="flex flex-col items-center gap-1.5 w-full">
                     <div className="relative w-16 h-16 rounded overflow-hidden border border-white/10 bg-zinc-900 flex items-center justify-center">
-                      <NextImage
-                        src={selectedFileUrl}
-                        alt="Preview"
-                        fill
-                        sizes="64px"
-                        unoptimized
-                        className="object-cover"
-                      />
+                      {selectedVideo ? (
+                        <video
+                          src={selectedFileUrl}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          aria-label="Video preview"
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <NextImage
+                          src={selectedFileUrl}
+                          alt="Preview"
+                          fill
+                          sizes="64px"
+                          unoptimized
+                          className="object-cover"
+                        />
+                      )}
                     </div>
                     <span className="text-xs font-mono text-white/70 truncate max-w-[240px]">
                       {selectedFile.name}
@@ -645,16 +802,68 @@ export function CreateWorldModal({ open, onClose }: Props) {
                   <>
                     <UploadSimple size={24} className="text-white/45" />
                     <span className="text-xs font-mono text-white/60">
-                      Drag & drop image here, or click to browse
+                      Drag & drop an image or walkthrough video
                     </span>
                     <span className="text-[10px] font-mono text-white/30">
-                      Supports PNG, JPG, WEBP (Max 10MB)
+                      Images up to 10 MB · Videos up to 5 GB
                     </span>
                   </>
                 )}
               </div>
               {fileError && <span className="text-[10px] font-mono text-red-300/80" role="alert">{fileError}</span>}
             </div>
+
+            {selectedVideo && (
+              <div className="grid grid-cols-1 gap-3 rounded-lg border border-white/10 bg-white/[0.025] p-3 sm:grid-cols-[1fr_8rem]">
+                <div className="flex flex-col gap-1.5">
+                  <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-white/50">
+                    Reconstruction quality
+                  </span>
+                  <div className="grid grid-cols-3 gap-1 rounded-md bg-black/25 p-1">
+                    {([
+                      ['preview', 'Preview'],
+                      ['standard', 'Standard'],
+                      ['quality', 'Quality'],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setVideoQuality(value)}
+                        className={`rounded px-2 py-1.5 font-mono text-[10px] transition ${
+                          videoQuality === value
+                            ? 'bg-white text-black'
+                            : 'text-white/45 hover:bg-white/[0.06] hover:text-white/75'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="font-mono text-[9px] leading-relaxed text-white/30">
+                    {videoQuality === 'preview'
+                      ? '140 frames · 7k steps'
+                      : videoQuality === 'standard'
+                        ? '280 frames · 20k steps'
+                        : '400 frames · 30k steps'}
+                  </span>
+                </div>
+                <label className="flex flex-col gap-1.5 font-mono text-[10px] uppercase tracking-wider text-white/50">
+                  Camera height
+                  <div className="flex items-center rounded-md border border-white/10 bg-black/25 px-2">
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={3}
+                      step={0.05}
+                      value={cameraHeight}
+                      onChange={(event) => setCameraHeight(Number(event.target.value))}
+                      className="min-w-0 flex-1 bg-transparent py-1.5 text-right text-xs text-white outline-none"
+                    />
+                    <span className="ml-1 text-white/30">m</span>
+                  </div>
+                </label>
+              </div>
+            )}
 
             <div className="flex justify-end gap-2 mt-2">
               <AppButton

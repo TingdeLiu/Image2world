@@ -573,6 +573,10 @@ export function sanitizePlacementProject(input: unknown): WorldSceneProject | un
     spawnPoint.every((part) => typeof part === 'number' && Number.isFinite(part))
       ? [spawnPoint[0] as number, spawnPoint[1] as number]
       : undefined
+  const spawnYaw = record.spawnYaw
+  const spawnPitch = record.spawnPitch
+  const spawnPosition = record.spawnPosition
+  const defaultController = record.defaultController
 
   return {
     version: PROJECT_VERSION,
@@ -584,6 +588,10 @@ export function sanitizePlacementProject(input: unknown): WorldSceneProject | un
     ...(normalizedShadowCatcherOpacity !== undefined ? { shadowCatcherOpacity: normalizedShadowCatcherOpacity } : {}),
     ...(normalizedShadowCatcherColor !== undefined ? { shadowCatcherColor: normalizedShadowCatcherColor } : {}),
     ...(normalizedSpawnPoint ? { spawnPoint: normalizedSpawnPoint } : {}),
+    ...(isVec3(spawnPosition) ? { spawnPosition } : {}),
+    ...(typeof spawnYaw === 'number' && Number.isFinite(spawnYaw) ? { spawnYaw } : {}),
+    ...(typeof spawnPitch === 'number' && Number.isFinite(spawnPitch) ? { spawnPitch } : {}),
+    ...(defaultController === 'fly' || defaultController === 'fps' ? { defaultController } : {}),
   }
 }
 

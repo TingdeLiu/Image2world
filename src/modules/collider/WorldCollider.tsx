@@ -15,6 +15,7 @@ import { retainGltfResource } from '../../utils/threeResourceLifecycle'
 interface Props {
   url: string
   flipY?: boolean
+  rotationX?: number
   groundPlaneOffset?: number
   metricScaleFactor?: number
   shadowOpacity?: number
@@ -23,14 +24,14 @@ interface Props {
 
 const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 
-export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor, shadowOpacity, shadowColor }: Props) {
+export function WorldCollider({ url, flipY, rotationX, groundPlaneOffset, metricScaleFactor, shadowOpacity, shadowColor }: Props) {
   const { scene: rawScene } = useGLTF(url)
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
   const worldRenderMode = useDebugStore((s) => s.worldRenderMode)
   const { wireframeMaterial, shadedMaterial, wireframeOverlayMaterial } = useAssetMaterials()
   const normalizedGroundPlaneOffset = groundPlaneOffset ?? 0
   const normalizedMetricScaleFactor = metricScaleFactor ?? 1
-  const normalizedRotation = flipY ? Math.PI : 0
+  const normalizedRotation = rotationX ?? (flipY ? Math.PI : 0)
   const colliderTransformKey = `${url}:${normalizedRotation}:${normalizedGroundPlaneOffset}:${normalizedMetricScaleFactor}`
 
   useEffect(

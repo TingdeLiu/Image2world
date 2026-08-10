@@ -60,6 +60,11 @@ __pycache__/
 # Local scratch images used for manual pipeline runs
 /*.webp
 
+# Local reconstruction datasets, checkpoints, exports, and service logs.
+# These can contain source videos and multi-gigabyte Gaussian artifacts.
+/.artifacts/
+/service-logs/
+
 # usd export (see scripts/usd-export/README.md)
 /scripts/usd-export/.venv
 /scripts/usd-export/__pycache__

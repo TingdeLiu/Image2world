@@ -39,6 +39,7 @@ interface Props {
   visible?: boolean
   groundPlaneOffset?: number
   flipY?: boolean
+  rotationX?: number
   metricScaleFactor?: number
   onProgress?: (progress: number) => void
   onReady?: () => void
@@ -51,6 +52,7 @@ export function SplatRenderer({
   visible = true,
   groundPlaneOffset = 0,
   flipY,
+  rotationX,
   metricScaleFactor = 1,
   onProgress,
   onReady,
@@ -140,7 +142,7 @@ export function SplatRenderer({
 
     return (
       <SparkRendererEl ref={sparkRef} args={[sparkArgs]} visible={visible}>
-        <group position={[0, groundPlaneOffset, 0]} rotation={[flipY ? Math.PI : 0, 0, 0]} scale={metricScaleFactor}>
+        <group position={[0, groundPlaneOffset, 0]} rotation={[rotationX ?? (flipY ? Math.PI : 0), 0, 0]} scale={metricScaleFactor}>
           <SplatMeshEl ref={splatRef} args={[splatArgs]} />
         </group>
       </SparkRendererEl>

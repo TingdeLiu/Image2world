@@ -31,6 +31,7 @@ const DEFAULT_WORLD_SEMANTICS = {
   metric_scale_factor: 1,
   ground_plane_offset: 0,
   flip_y: true,
+  rotation_x: undefined as number | undefined,
 }
 
 function sunPositionFromRotation(rotation: Vec3Tuple): Vec3Tuple {
@@ -167,6 +168,7 @@ export function WorldViewer({
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
   const viewerQuality = useDebugStore((s) => s.viewerQuality)
   const controllerMode = useDebugStore((s) => s.controllerMode)
+  const setControllerMode = useDebugStore((s) => s.setControllerMode)
   const controllerResetToken = useDebugStore((s) => s.controllerResetToken)
   const environmentIntensity = useDebugStore((s) => s.environmentIntensity)
   const sunIntensity = useDebugStore((s) => s.sunIntensity)
@@ -210,7 +212,7 @@ export function WorldViewer({
   ])
 
   const splatUrl = desiredWorld ? getSplatUrl(desiredWorld, viewerQuality) : ''
-  const { ground_plane_offset, flip_y, metric_scale_factor } = desiredWorld?.assets.splats.semantics_metadata ?? DEFAULT_WORLD_SEMANTICS
+  const { ground_plane_offset, flip_y, rotation_x, metric_scale_factor } = desiredWorld?.assets.splats.semantics_metadata ?? DEFAULT_WORLD_SEMANTICS
   const flipY = flip_y ?? true
   const baseMetricScaleFactor = metric_scale_factor ?? 1
   const baseGroundPlaneOffset = ground_plane_offset ?? 0
@@ -254,6 +256,12 @@ export function WorldViewer({
   const objectPlacements = sceneProject?.instances ?? placementEditor.instances
   const objectPhysicsAssets = sceneProject?.instances.length ? allObjectAssets : desiredObjectAssets
   const activeControllerMode = editing ? 'fly' : controllerMode
+
+  useEffect(() => {
+    if (!editing && sceneProject?.defaultController) {
+      setControllerMode(sceneProject.defaultController)
+    }
+  }, [desiredSlug, editing, sceneProject?.defaultController, setControllerMode])
   const hoveredObjectAsset = hoveredObjectAssetId
     ? allObjectAssets.find((asset) => asset.assetId === hoveredObjectAssetId)
       ?? desiredObjectAssets.find((asset) => asset.assetId === hoveredObjectAssetId)
@@ -287,11 +295,16 @@ export function WorldViewer({
                 ref={charRef as React.RefObject<FlyControllerHandle>}
                 preserveCameraOnMount={editing}
                 spawnPoint={sceneProject?.spawnPoint}
+                initialPosition={sceneProject?.spawnPosition}
+                initialYaw={sceneProject?.spawnYaw}
+                initialPitch={sceneProject?.spawnPitch}
               />
             ) : (
               <CharacterController
                 ref={charRef as React.RefObject<CharacterControllerHandle>}
                 spawnPoint={sceneProject?.spawnPoint}
+                initialYaw={sceneProject?.spawnYaw}
+                initialPitch={sceneProject?.spawnPitch}
               />
             )}
             {showScene && colliderUrl && (
@@ -300,6 +313,7 @@ export function WorldViewer({
                   <WorldCollider
                     url={colliderUrl}
                     flipY={flipY}
+                    rotationX={rotation_x}
                     groundPlaneOffset={activeGroundPlaneOffset}
                     metricScaleFactor={activeMetricScaleFactor}
                     shadowOpacity={activeShadowCatcherOpacity}
@@ -332,6 +346,7 @@ export function WorldViewer({
                 visible={showSplat}
                 groundPlaneOffset={activeGroundPlaneOffset}
                 flipY={flipY}
+                rotationX={rotation_x}
                 metricScaleFactor={activeMetricScaleFactor}
                 onProgress={onSceneProgress}
                 onReady={onSceneReady}

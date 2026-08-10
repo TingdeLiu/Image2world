@@ -17,6 +17,9 @@ interface FlyControllerProps {
   preserveCameraOnMount?: boolean
   /** Floor position [x, z] the scene wants the camera to start at. */
   spawnPoint?: [number, number]
+  initialPosition?: [number, number, number]
+  initialYaw?: number
+  initialPitch?: number
 }
 
 const SPEED = 6
@@ -32,7 +35,7 @@ const _up = new THREE.Vector3(0, 1, 0)
 const _move = new THREE.Vector3()
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ')
 
-export const FlyController = forwardRef<FlyControllerHandle, FlyControllerProps>(function FlyController({ preserveCameraOnMount = false, spawnPoint }, ref) {
+export const FlyController = forwardRef<FlyControllerHandle, FlyControllerProps>(function FlyController({ preserveCameraOnMount = false, spawnPoint, initialPosition, initialYaw = DEFAULT_YAW, initialPitch = 0 }, ref) {
   const { camera, gl } = useThree()
   const mouseSensitivity = useDebugStore((s) => s.flyMouseSensitivity)
   const keys = useRef(new Set<string>())
@@ -42,19 +45,20 @@ export const FlyController = forwardRef<FlyControllerHandle, FlyControllerProps>
   const smoothPitch = useRef(0)
 
   const reset = useCallback(() => {
-    camera.position.set(
-      spawnPoint ? spawnPoint[0] : CHARACTER_SPAWN.x,
-      CHARACTER_SPAWN.y,
-      spawnPoint ? spawnPoint[1] : CHARACTER_SPAWN.z,
-    )
+    if (initialPosition) camera.position.set(...initialPosition)
+    else camera.position.set(
+        spawnPoint ? spawnPoint[0] : CHARACTER_SPAWN.x,
+        CHARACTER_SPAWN.y,
+        spawnPoint ? spawnPoint[1] : CHARACTER_SPAWN.z,
+      )
     cameraFocusTarget.current = null
     keys.current.clear()
-    rawYaw.current = DEFAULT_YAW
-    rawPitch.current = 0
-    smoothYaw.current = DEFAULT_YAW
-    smoothPitch.current = 0
-    camera.quaternion.setFromEuler(_euler.set(0, DEFAULT_YAW, 0))
-  }, [camera, spawnPoint])
+    rawYaw.current = initialYaw
+    rawPitch.current = initialPitch
+    smoothYaw.current = initialYaw
+    smoothPitch.current = initialPitch
+    camera.quaternion.setFromEuler(_euler.set(initialPitch, initialYaw, 0))
+  }, [camera, initialPitch, initialPosition, initialYaw, spawnPoint])
 
   const preserveCamera = useCallback(() => {
     cameraFocusTarget.current = null
