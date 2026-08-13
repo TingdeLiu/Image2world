@@ -11,9 +11,13 @@
 conda activate image2world
 python backend\server.py
 ```
-- 看到 `Uvicorn running on http://0.0.0.0:8000` 即就绪。
+- 看到 `Uvicorn running on http://127.0.0.1:8000` 即就绪。默认只监听回环——
+  后端没有任何鉴权，一次请求就能占住 GPU 数小时，不该随手挂到局域网上。
+  确实需要时设 `IMAGEWORLD_BIND_HOST=0.0.0.0`，并用 `IMAGEWORLD_ALLOWED_ORIGINS`
+  把访问它的前端地址加进白名单。
 - 模型**延迟加载**：首次调用某功能才加载对应模型（SHARP 权重已缓存，无需重下）。
-- 交互式接口文档：<http://localhost:8000/docs>
+- 交互式接口文档默认关闭（关掉的端点不该自报家门）。需要时设
+  `IMAGEWORLD_DOCS=true` 再启动，然后访问 <http://localhost:8000/docs>。
 
 > 可选：想让**自动模式**也用 SAM 3 语义分割（默认自动模式用 SAM 2），先设环境变量再启动：
 > ```powershell

@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { openFolder } from '../../../utils/worldsScanner'
 import { LOCAL_TOOLS_ENABLED } from '../../../utils/localTools'
+import { isAppRequest } from '../../../utils/sameOrigin'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,7 +15,11 @@ export async function GET(request: NextRequest) {
   // instance would let any visitor spawn processes there -- and `target=root`
   // opens the repository itself. 404 rather than 403, so a disabled endpoint
   // does not advertise that it exists.
-  if (!LOCAL_TOOLS_ENABLED) {
+  //
+  // In development the tools are on by design, which leaves the route open to
+  // any other tab the user has -- so the caller must also prove it is this app.
+  // Both checks run before `target=root`, which would otherwise return early.
+  if (!LOCAL_TOOLS_ENABLED || !isAppRequest(request)) {
     return new NextResponse('Not found', { status: 404 })
   }
 

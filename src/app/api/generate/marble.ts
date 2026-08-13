@@ -56,12 +56,6 @@ async function marbleFetch(pathname: string, { apiKey, ...init }: MarbleRequestI
 }
 
 /** Confirm a key works and report what is left. Cheap, and never bills. */
-export async function fetchMarbleCredits(apiKey: string, signal: AbortSignal) {
-  const res = await marbleFetch('/credits', { apiKey, cache: 'no-store' }, signal)
-  const data = await res.json() as { remaining_credits?: number }
-  return typeof data.remaining_credits === 'number' ? data.remaining_credits : undefined
-}
-
 async function uploadSourceImage(apiKey: string, imageBuffer: Buffer, signal: AbortSignal) {
   const prepared = await marbleFetch('/media-assets:prepare_upload', {
     apiKey,

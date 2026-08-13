@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import type { AssetStreamState, WorldViewerProps } from './WorldViewer'
 import { WorldSidebar } from './WorldSidebar'
 import { BottomLeftControls, ViewerModeHotkeys } from './BottomLeftControls'
+import { ControlsHint } from './ControlsHint'
 import { TouchControls } from './TouchControls'
 import { useSceneProject } from '../modules/scene/useSceneProject'
 import { hydrateDebugStore, useDebugStore } from '../store/debug'
@@ -371,6 +372,9 @@ export function LoadedApp({
         state={assetStreamState}
         visible={viewerLoadState.phase === 'ready' && assetStreamState.active}
       />
+      {/* Only once the world is actually walkable -- telling someone to press W
+          while they are still watching a progress bar is just noise. */}
+      <ControlsHint visible={!editing && uiVisible && viewerLoadState.phase === 'ready'} />
       <ViewerModeHotkeys />
       {!editing && LevaPanel && DebugPanel && showLeva && uiVisible && (
         <div className="hidden md:block">

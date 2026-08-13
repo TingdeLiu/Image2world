@@ -3,6 +3,8 @@ import fs from 'fs'
 import path from 'path'
 import { createBinaryPlyLod } from '../../../utils/plyLod'
 import { MarbleError, generateWorldWithMarble } from './marble'
+import { isAppRequest } from '../../../utils/sameOrigin'
+import { buildWalkableMap } from '../../../utils/walkableMap'
 
 export const dynamic = 'force-dynamic'
 // The local SHARP path finishes in well under a minute, but a Marble generation
@@ -405,6 +407,11 @@ async function runGeneration(
     const collider = await buildBackgroundCollider(worldOutDir, signal)
     const groundPlaneOffset = collider?.groundPlaneOffset ?? 0
 
+    // SHARP output is metric already, so the map is measured at a scale of 1.
+    // No spawn point yet either -- SHARP worlds deliberately record none, so
+    // the largest connected region stands in for "the room".
+    await buildWalkableMap(AI_BACKEND_URL, worldOutDir, { flipY: true, metricScale: 1, signal })
+
     // 6. Minimal world manifest so the scanner picks up the local .ply splat.
     const worldJson = {
       world_id: slug,
@@ -482,6 +489,13 @@ function generationErrorResponse(
 }
 
 export async function POST(request: NextRequest) {
+  // A generation ties up the GPU for a minute locally, or bills a Marble key
+  // for real money. `multipart/form-data` is a CORS simple request, so without
+  // this check any other tab can start one.
+  if (!isAppRequest(request)) {
+    return generationErrorResponse('Forbidden', 403, 'forbidden')
+  }
+
   let formData: FormData
   try {
     formData = await request.formData()

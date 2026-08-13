@@ -13,8 +13,8 @@ if not hasattr(torch, "float8_e8m0fnu"):
 import numpy as np
 import cv2
 from PIL import Image
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from simple_lama_inpainting import SimpleLama
 
@@ -25,26 +25,149 @@ except ImportError:  # pragma: no cover - exercised by the production entrypoint
     from gpu_scheduler import run_with_gpu_lock
     from reconstruction_jobs import router as reconstruction_jobs_router
 
+# Every endpoint here is unauthenticated and several of them tie up the GPU for
+# minutes, so the interactive docs are opt-in: on a machine that binds beyond
+# loopback, /docs is a menu of what to call.
+DOCS_ENABLED = os.environ.get("IMAGEWORLD_DOCS") == "true"
+
 # Initialize FastAPI app
-app = FastAPI(title="ImageWorld Local AI Inference Backend")
+app = FastAPI(
+    title="ImageWorld Local AI Inference Backend",
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
+)
 
 @app.get("/")
 def read_root():
     return {
         "status": "online",
         "message": "ImageWorld Local AI Inference Backend is running successfully!",
-        "documentation": "http://localhost:8000/docs"
+        "documentation": "http://localhost:8000/docs" if DOCS_ENABLED else None,
     }
+
+
+# A full-resolution PLY is 50-60 MB and a multi-view merge more, so uploads here
+# are legitimately large. But `UploadFile.read()` with no argument buffers the
+# whole body in memory at once, which turns "large" into "however much the
+# client feels like sending".
+#
+# What this cap does and does not cover, so nobody reads more into it later:
+# Starlette has already parsed the multipart body before a handler runs, into a
+# SpooledTemporaryFile that spills to disk past 1 MB. So the cap bounds *resident
+# memory*, not what reaches the disk -- a huge upload still gets written before
+# 413 comes back. Bounding that needs an ASGI-level Content-Length check or a
+# reverse proxy. The budget below is also per handler, not per field, so an
+# endpoint taking several files shares one allowance between them.
+
+
+# 1 GiB. The largest cloud in this repo is a 194 MB splatfacto PLY and
+# `/api/extract-prop` deliberately sends the full-resolution one, so the ceiling
+# has to sit well above that -- a limit that rejects real work is worse than no
+# limit, especially now that cross-origin callers are turned away outright.
+DEFAULT_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
+
+
+def _upload_limit() -> int:
+    raw = os.environ.get("IMAGEWORLD_MAX_UPLOAD_BYTES")
+    if not raw:
+        return DEFAULT_MAX_UPLOAD_BYTES
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        print(f"warning: ignoring IMAGEWORLD_MAX_UPLOAD_BYTES={raw!r} (not a number)")
+        return DEFAULT_MAX_UPLOAD_BYTES
+
+
+MAX_UPLOAD_BYTES = _upload_limit()
+UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+class UploadBudget:
+    """A byte allowance shared across every upload in one request."""
+
+    def __init__(self, limit: int = MAX_UPLOAD_BYTES) -> None:
+        self.limit = limit
+        self.spent = 0
+
+    def take(self, count: int) -> None:
+        self.spent += count
+        if self.spent > self.limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Uploads exceed the {self.limit // (1024 * 1024)} MB limit for one request",
+            )
+
+
+async def read_upload(file: UploadFile, budget: UploadBudget | None = None) -> bytes:
+    """Buffer an upload whole, rejecting anything past the budget rather than dying on it.
+
+    Charges the budget from the declared size where the multipart parser gives
+    one, so the common path is still a single `read()` and costs exactly what it
+    did before. Accumulating chunks and joining them would hold the file twice
+    at once, and a 194 MB point cloud alongside SAM and SHARP on a 16 GB card is
+    not the place to double anything.
+    """
+    budget = budget or UploadBudget()
+    size = getattr(file, "size", None)
+    if isinstance(size, int):
+        budget.take(size)
+        return await file.read()
+
+    # No declared size: pay the double to keep the cap honest.
+    chunks: list[bytes] = []
+    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+        budget.take(len(chunk))
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+] + [
+    origin.strip()
+    for origin in os.environ.get("IMAGEWORLD_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+
+@app.middleware("http")
+async def reject_cross_origin_writes(request: Request, call_next):
+    """Refuse writes from pages this app did not serve.
+
+    CORS does not do this. It decides who may *read* a response, and the
+    browser enforces that after the request has already arrived and run. A
+    `multipart/form-data` POST with no custom headers is a "simple request":
+    it is sent without a preflight, so any page open in the user's browser can
+    start a Splatfacto job here and simply not read the reply.
+
+    That matters because the frontend talks to this server directly from the
+    browser (see `CreateWorldModal`'s reconstruction upload), so the guard on
+    the Next.js routes protects none of the endpoints that actually hold the
+    GPU. This is where it has to be.
+
+    A missing `Origin` means the caller is not a browser -- curl, the Next
+    server's own fetches, a test. Those are allowed: anyone who can run a
+    process on this machine can already reach the files directly, so refusing
+    them buys nothing and would break both the server-side routes and the
+    documented CLI usage.
+    """
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in ALLOWED_ORIGINS:
+            return JSONResponse(
+                {"detail": "Cross-origin writes are not accepted"},
+                status_code=403,
+            )
+    return await call_next(request)
+
 
 # Enable CORS for Next.js app communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -320,7 +443,7 @@ async def segment_image(
     the pipeline never hard-fails.
     """
     try:
-        contents = await file.read()
+        contents = await read_upload(file)
         pil_image = Image.open(io.BytesIO(contents)).convert("RGB")
         img_np = np.array(pil_image)
         h, w, _ = img_np.shape
@@ -345,6 +468,10 @@ async def segment_image(
         print(f"[{used}] generated {len(results)} object proposals.")
         return {"width": w, "height": h, "objects": results, "segmenter_used": used}
 
+    except HTTPException:
+        # A deliberate 4xx (an oversized upload, an unusable selection) must not
+        # be flattened into a 500 by the catch-all below.
+        raise
     except Exception as e:
         print(f"Segmentation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -386,7 +513,7 @@ async def segment_point(
     user hand-pick exactly which objects become 3D props.
     """
     try:
-        contents = await file.read()
+        contents = await read_upload(file)
         pil_image = Image.open(io.BytesIO(contents)).convert("RGB")
         img_np = np.array(pil_image)
         h, w, _ = img_np.shape
@@ -442,13 +569,16 @@ async def inpaint_image(
     top of the previous hallucination.
     """
     try:
-        img_bytes = await image.read()
+        # `masks` is an unbounded list, so the allowance has to be shared --
+        # a per-file cap here would be no cap at all.
+        budget = UploadBudget()
+        img_bytes = await read_upload(image, budget)
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
         union = None
         for mask_file in masks:
             mask_np = np.array(
-                Image.open(io.BytesIO(await mask_file.read())).convert("L").resize(pil_img.size, Image.NEAREST)
+                Image.open(io.BytesIO(await read_upload(mask_file, budget))).convert("L").resize(pil_img.size, Image.NEAREST)
             )
             union = mask_np if union is None else np.maximum(union, mask_np)
         if union is None:
@@ -493,8 +623,9 @@ async def crop_image(
     Returns a transparent PNG cropped tightly to the object bounding box.
     """
     try:
-        img_bytes = await image.read()
-        mask_bytes = await mask.read()
+        budget = UploadBudget()
+        img_bytes = await read_upload(image, budget)
+        mask_bytes = await read_upload(mask, budget)
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         pil_mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
 
@@ -520,6 +651,10 @@ async def crop_image(
 
         return StreamingResponse(await run_off_loop(work), media_type="image/png")
 
+    except HTTPException:
+        # A deliberate 4xx (an oversized upload, an unusable selection) must not
+        # be flattened into a 500 by the catch-all below.
+        raise
     except Exception as e:
         print(f"Cropping failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -531,7 +666,7 @@ async def image_to_3d(file: UploadFile = File(...)):
     """
     global tsr_model
     try:
-        contents = await file.read()
+        contents = await read_upload(file)
         pil_image = Image.open(io.BytesIO(contents)).convert("RGBA")
 
         def work():
@@ -603,6 +738,10 @@ async def image_to_3d(file: UploadFile = File(...)):
             headers={"X-Mesh-Extents": ",".join(f"{float(v):.6f}" for v in extents)},
         )
 
+    except HTTPException:
+        # A deliberate 4xx (an oversized upload, an unusable selection) must not
+        # be flattened into a 500 by the catch-all below.
+        raise
     except Exception as e:
         print(f"3D generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -724,7 +863,7 @@ async def image_to_splat(file: UploadFile = File(...)):
     from sharp.utils import io as sharp_io
     from sharp.utils.gaussians import save_ply
     try:
-        contents = await file.read()
+        contents = await read_upload(file)
 
         def work():
             predictor = get_sharp()
@@ -746,6 +885,10 @@ async def image_to_splat(file: UploadFile = File(...)):
         print(f"SHARP splat generated ({len(ply_bytes)} bytes).")
         return Response(content=ply_bytes, media_type="application/octet-stream")
 
+    except HTTPException:
+        # A deliberate 4xx (an oversized upload, an unusable selection) must not
+        # be flattened into a 500 by the catch-all below.
+        raise
     except Exception as e:
         print(f"SHARP splat generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -933,16 +1076,247 @@ async def place_objects(
         ]
         # Projecting a million gaussians is CPU-bound but still blocks for
         # seconds, so it goes through the same queue as the GPU work.
-        ply_bytes = await file.read()
+        ply_bytes = await read_upload(file)
         results, ground_plane_offset = await run_heavy(locate_objects, ply_bytes, mask_images)
 
         located = sum(1 for r in results if r.get("located"))
         print(f"Placed {located}/{len(results)} objects (ground offset {ground_plane_offset:.3f}).")
         return {"placements": results, "ground_plane_offset": ground_plane_offset}
 
+    except HTTPException:
+        # A deliberate 4xx (an oversized upload, an unusable selection) must not
+        # be flattened into a 500 by the catch-all below.
+        raise
     except Exception as e:
         print(f"Object placement failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/extract-prop")
+async def extract_prop(
+    file: UploadFile = File(...),
+    image: UploadFile | None = File(None),
+    existing: UploadFile | None = File(None),
+    prop_id: str = Form("prop-0"),
+    point: str | None = Form(None),
+    box: str | None = Form(None),
+    voxel_size: float = Form(0.03),
+    metric_scale: float = Form(1.0),
+):
+    """Cut one movable prop out of a world's gaussians.
+
+    Two ways to say which prop, because neither alone is good enough:
+
+    - `point`: a splat-space [x, y, z] the user clicked. It is projected back
+      through SHARP's own camera to a source pixel, SAM 2 segments the object
+      there, and the mask selects the gaussians. Accurate boundaries, but SAM
+      can pick the wrong thing.
+    - `box`: a splat-space [[x,y,z],[x,y,z]] the user dragged. Exactly what
+      they asked for, and the fallback when SAM gets it wrong.
+
+    Connected components cannot do this job: measured across three worlds a
+    single component holds 90-98% of the room mesh, because anything standing
+    on the floor is fused to it at voxel resolution.
+
+    Returns the prop's collision shell as a GLB in splat space -- the same
+    space as the world collider, so the viewer applies the one transform it
+    already has.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent / "tools"))
+    try:
+        from build_props import (
+            gaussians_in_box,
+            gaussians_under_mask,
+            merge_props,
+            prop_collider,
+            prop_descriptor,
+            project_to_pixels,
+        )
+    except ImportError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"prop dependencies missing ({e}); pip install scikit-image trimesh",
+        )
+
+    if (point is None) == (box is None):
+        raise HTTPException(status_code=400, detail="give exactly one of `point` or `box`")
+
+    try:
+        # One allowance across the cloud, the source photo and the existing
+        # props file, since all three arrive on the same request.
+        budget = UploadBudget()
+        contents = await read_upload(file, budget)
+        xyz, opacity, K, width, height = _read_splat_ply_with_camera(contents)
+
+        if box is not None:
+            corners = np.asarray(json.loads(box), dtype=np.float64)
+            if corners.shape != (2, 3):
+                raise HTTPException(status_code=400, detail="`box` must be [[x,y,z],[x,y,z]]")
+            selected = gaussians_in_box(
+                xyz, corners.min(axis=0), corners.max(axis=0), opacity=opacity
+            )
+            label = "box selection"
+        else:
+            if image is None:
+                raise HTTPException(status_code=400, detail="`point` selection needs the source image")
+            target = np.asarray(json.loads(point), dtype=np.float64).reshape(1, 3)
+            u, v, valid = project_to_pixels(target, K, width, height)
+            if not valid[0]:
+                raise HTTPException(status_code=400, detail="that point is not visible to the world's camera")
+
+            source = np.array(Image.open(io.BytesIO(await read_upload(image, budget))).convert("RGB"))
+            # The photo the world was built from may have been resized since;
+            # SAM works in its pixels, the projection in the splat's.
+            scale_x = source.shape[1] / width
+            scale_y = source.shape[0] / height
+
+            def segment():
+                predictor = get_sam2_predictor()
+                predictor.set_image(source)
+                return predictor.predict(
+                    point_coords=np.array([[float(u[0]) * scale_x, float(v[0]) * scale_y]]),
+                    point_labels=np.array([1]),
+                    multimask_output=True,
+                )
+
+            masks, scores, _ = await run_heavy(segment)
+            mask_bool = masks[int(np.argmax(scores))].astype(bool)
+            if mask_bool.shape != (height, width):
+                mask_bool = np.array(
+                    Image.fromarray(mask_bool).resize((width, height), Image.NEAREST)
+                )
+            selected = gaussians_under_mask(xyz, K, width, height, mask_bool, opacity=opacity)
+            label = f"SAM 2 mask (score {float(scores[int(np.argmax(scores))]):.2f})"
+
+        if len(selected) == 0:
+            raise HTTPException(status_code=422, detail="nothing selected there")
+
+        previous = await read_upload(existing, budget) if existing is not None else None
+
+        # `voxel_size` stays in the cloud's own units. Reinterpreting it as
+        # metres would change the shell every existing prop was cut with, and
+        # the only quantity here that has to be metric is the mass.
+        scale = metric_scale if metric_scale > 0 else 1.0
+
+        def build():
+            mesh = prop_collider(xyz[selected], voxel_size=voxel_size)
+            # Return the whole props GLB, not just this prop: the caller is a
+            # Next.js route that only moves bytes around and has no GLB parser.
+            return mesh, merge_props(previous, mesh, prop_id)
+
+        try:
+            mesh, glb_bytes = await run_off_loop(build)
+        except ValueError as e:
+            # Too few gaussians or too small a shell: a user problem, not a bug.
+            raise HTTPException(status_code=422, detail=str(e))
+
+        descriptor = prop_descriptor(mesh, metric_scale=scale)
+        print(f"Prop '{prop_id}' extracted from {label}: {len(selected):,} gaussians, {descriptor['mass']} kg")
+        return {
+            "props_glb": base64.b64encode(glb_bytes).decode("ascii"),
+            "prop_id": prop_id,
+            "gaussian_count": int(len(selected)),
+            "source": label,
+            **descriptor,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Prop extraction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        clear_vram()
+
+
+@app.post("/api/walkable")
+async def walkable_map(
+    file: UploadFile = File(...),
+    flip_y: bool = Form(True),
+    rotation_x: float | None = Form(None),
+    metric_scale: float = Form(1.0),
+    spawn_x: float | None = Form(None),
+    spawn_z: float | None = Form(None),
+):
+    """Where a person could actually stand, as a mask over the floor plan.
+
+    Takes the collision mesh rather than the point cloud, for two reasons. It is
+    a hundred times smaller and already carries the surface split, so there is
+    nothing to voxelise again. And it can be called *after* the collider, which
+    is the only order that works for a video reconstruction: that world's metric
+    scale is calculated from the collider's own floor height, so the scale this
+    map has to be measured at does not exist until the collider is finished.
+
+    `spawn_x` / `spawn_z` are viewer-space metres. Without them the largest
+    connected region stands in for "the room", which is the right guess when the
+    caller has not written scene.json yet.
+    """
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent / "tools"))
+    try:
+        import trimesh
+
+        from build_walkable import build_walkable_map, collider_groups
+    except ImportError as e:
+        raise HTTPException(status_code=501, detail=f"walkable dependencies missing ({e})")
+
+    contents = await read_upload(file)
+    scale = metric_scale if metric_scale > 0 else 1.0
+
+    def work():
+        import io as _io
+
+        scene = trimesh.load(_io.BytesIO(contents), file_type="glb", process=False)
+        if not isinstance(scene, trimesh.Scene):
+            scene = trimesh.Scene(scene)
+        mesh, groups = collider_groups(scene)
+        if not groups:
+            raise ValueError(
+                "this collider predates the surface split, so there is no floor to map"
+            )
+
+        # Same reasoning as the collider: standing is decided by which way a
+        # face points, so measure in the space the viewer will show.
+        if rotation_x is None:
+            oriented, oriented_flip_y = mesh, flip_y
+        else:
+            oriented = mesh.copy()
+            oriented.apply_transform(
+                trimesh.transformations.rotation_matrix(rotation_x, [1, 0, 0])
+            )
+            oriented_flip_y = False
+
+        # `CELL_SIZE` and `CHARACTER_HEIGHT` are metres; the mesh is not.
+        if scale != 1.0:
+            oriented = oriented.copy()
+            oriented.apply_scale(scale)
+
+        spawn = None if spawn_x is None or spawn_z is None else (spawn_x, spawn_z)
+        return build_walkable_map(
+            oriented,
+            groups,
+            flip_y=oriented_flip_y,
+            spawn_xz=spawn,
+            metric_scale_factor=scale,
+        )
+
+    try:
+        # Surface sampling and a flood fill: no GPU, but seconds of CPU.
+        png, meta = await run_off_loop(work)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    stranded = meta["standable_area"] - meta["walkable_area"]
+    print(
+        f"Walkable: {meta['walkable_area']:.1f} m2 reachable of "
+        f"{meta['standable_area']:.1f} m2 standable ({stranded:.1f} m2 stranded)"
+    )
+    return {"mask_png": base64.b64encode(png).decode("ascii"), **meta}
 
 
 @app.post("/api/splat-to-collider")
@@ -970,7 +1344,13 @@ async def splat_to_collider(
 
     sys.path.insert(0, str(Path(__file__).parent / "tools"))
     try:
-        from build_collider import build_collider, detect_ground_offset, read_splat_ply
+        from build_collider import (
+            build_collider,
+            classify_surfaces,
+            detect_floor_height,
+            labeled_collider_scene,
+            read_splat_ply,
+        )
     except ImportError as e:
         raise HTTPException(
             status_code=501,
@@ -978,7 +1358,7 @@ async def splat_to_collider(
         )
 
     try:
-        contents = await file.read()
+        contents = await read_upload(file)
 
         # Voxelising and marching-cubing a large cloud runs for tens of seconds.
         # It needs no GPU, but it is more than heavy enough to stall the loop.
@@ -996,11 +1376,14 @@ async def splat_to_collider(
                     max_distance=max_distance,
                     verbose=True,
                 )
-                glb_path = Path(td) / "collider.glb"
-                built.export(glb_path)
+                # Both the floor height and the surface split are decided by
+                # which way a face points, so they have to be measured in the
+                # space the viewer will see. A rigid rotation leaves face
+                # indices alone, so the groups still address `built`, which is
+                # what the GLB stores -- the viewer applies the rotation itself.
                 if rotation_x is None:
-                    ground_offset = detect_ground_offset(built, flip_y=flip_y)
                     viewer_mesh = None
+                    oriented, oriented_flip_y = built, flip_y
                 else:
                     import trimesh
 
@@ -1008,10 +1391,17 @@ async def splat_to_collider(
                     viewer_mesh.apply_transform(
                         trimesh.transformations.rotation_matrix(rotation_x, [1, 0, 0])
                     )
-                    ground_offset = detect_ground_offset(viewer_mesh, flip_y=False)
-                return built, viewer_mesh, ground_offset, glb_path.read_bytes()
+                    oriented, oriented_flip_y = viewer_mesh, False
 
-        mesh, viewer_mesh, ground_offset, glb_bytes = await run_heavy(work)
+                floor_y = detect_floor_height(oriented, flip_y=oriented_flip_y)
+                ground_offset = None if floor_y is None else -floor_y
+                groups = classify_surfaces(oriented, floor_y=floor_y, flip_y=oriented_flip_y)
+
+                glb_path = Path(td) / "collider.glb"
+                labeled_collider_scene(built, groups).export(glb_path)
+                return built, viewer_mesh, ground_offset, groups, glb_path.read_bytes()
+
+        mesh, viewer_mesh, ground_offset, groups, glb_bytes = await run_heavy(work)
         size = mesh.bounds[1] - mesh.bounds[0]
 
         # Report the extent in viewer space so the caller can place the camera
@@ -1036,15 +1426,25 @@ async def splat_to_collider(
                 "max": [float(hi[0]), float(hi[1] + offset), float(hi[2])],
             }
 
-        print(f"Collider built: {len(mesh.faces)} faces, room {size[0]:.1f}x{size[1]:.1f}x{size[2]:.1f} m")
+        surfaces = {name: int(len(faces)) for name, faces in groups.items()}
+        breakdown = ", ".join(f"{name} {count}" for name, count in surfaces.items())
+        print(
+            f"Collider built: {len(mesh.faces)} faces, room "
+            f"{size[0]:.1f}x{size[1]:.1f}x{size[2]:.1f} m, surfaces: {breakdown}"
+        )
         return {
             "collider_glb": base64.b64encode(glb_bytes).decode("ascii"),
             "ground_plane_offset": ground_offset,
             "face_count": int(len(mesh.faces)),
             "room_size": [float(v) for v in size],
             "bounds_viewer": bounds_viewer,
+            "surface_face_counts": surfaces,
         }
 
+    except HTTPException:
+        # A deliberate 4xx (an oversized upload, an unusable selection) must not
+        # be flattened into a 500 by the catch-all below.
+        raise
     except Exception as e:
         print(f"Collider generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1052,5 +1452,11 @@ async def splat_to_collider(
 
 if __name__ == "__main__":
     import uvicorn
-    # Start backend server on port 8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Loopback by default. Nothing here is authenticated, and the endpoints
+    # accept multi-gigabyte uploads and occupy the GPU for hours -- on a shared
+    # network, binding every interface hands that to anyone who can reach the
+    # port. The frontend talks to localhost:8000, so this costs it nothing.
+    # Set IMAGEWORLD_BIND_HOST=0.0.0.0 to expose it deliberately.
+    host = os.environ.get("IMAGEWORLD_BIND_HOST", "127.0.0.1")
+    print(f"Binding to {host}:8000")
+    uvicorn.run(app, host=host, port=8000)

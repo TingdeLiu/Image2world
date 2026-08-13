@@ -10,6 +10,9 @@ import type {
   WorldVersion,
   SourceImageVersion,
   WorldObjectPlacement,
+  WorldProp,
+  WorldProps,
+  WorldWalkable,
   WorldSceneSun
 } from '../types/world'
 
@@ -343,6 +346,97 @@ function worldAssetFilename(files: fs.Dirent[], index: number | undefined, slug:
   return byIndex(matches, index)?.name
 }
 
+/**
+ * Movable props carved out of this world, if any have been.
+ *
+ * The GLB holds one node per prop and the sidecar JSON holds their physics.
+ * Both must be present and agree: a prop listed with no node would be an
+ * invisible rigid body, and a node with no entry has no mass to move with.
+ */
+function readWorldProps(slug: string, files: fs.Dirent[], index: number | undefined): WorldProps | undefined {
+  const glb = worldAssetFilename(files, index, 'world-props', MODEL_EXTENSIONS)
+  const descriptor = worldAssetFilename(files, index, 'world-props', new Set(['.json']))
+  if (!glb || !descriptor) return undefined
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(
+      fs.readFileSync(path.join(worldsDir, slug, 'output', 'world', descriptor), 'utf-8'),
+    )
+  } catch {
+    return undefined
+  }
+
+  const record = parsed as Record<string, unknown>
+  if (!record || typeof record !== 'object' || !Array.isArray(record.props)) return undefined
+
+  const props = record.props.flatMap((entry): WorldProp[] => {
+    if (!entry || typeof entry !== 'object') return []
+    const item = entry as Record<string, unknown>
+    const { id, label, mass, centre } = item
+    if (typeof id !== 'string' || !id) return []
+    // A zero or negative mass makes Rapier misbehave rather than fail loudly.
+    if (typeof mass !== 'number' || !Number.isFinite(mass) || mass <= 0) return []
+    if (
+      !Array.isArray(centre) ||
+      centre.length !== 3 ||
+      !centre.every((part) => typeof part === 'number' && Number.isFinite(part))
+    ) return []
+    return [{
+      id,
+      ...(typeof label === 'string' && label ? { label } : {}),
+      mass,
+      centre: [centre[0] as number, centre[1] as number, centre[2] as number],
+    }]
+  })
+
+  if (!props.length) return undefined
+  return { version: 1, url: worldAssetUrl(slug, glb), props }
+}
+
+/** The walkable-area map, if this world's collider was built with one. */
+function readWorldWalkable(slug: string, files: fs.Dirent[], index: number | undefined): WorldWalkable | undefined {
+  const png = worldAssetFilename(files, index, 'world-walkable', IMAGE_EXTENSIONS)
+  const meta = worldAssetFilename(files, index, 'world-walkable', new Set(['.json']))
+  if (!png || !meta) return undefined
+
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(
+      fs.readFileSync(path.join(worldsDir, slug, 'output', 'world', meta), 'utf-8'),
+    ) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+
+  const number = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined)
+  const cellSize = number(parsed.cell_size)
+  const cols = number(parsed.cols)
+  const rows = number(parsed.rows)
+  const origin = parsed.origin
+  // Without any of these the mask cannot be placed on the floor plan, and a
+  // minimap that is confidently in the wrong place is worse than none.
+  if (!cellSize || cellSize <= 0 || !cols || !rows) return undefined
+  if (!Array.isArray(origin) || origin.length !== 2) return undefined
+  if (!origin.every((part) => typeof part === 'number' && Number.isFinite(part))) return undefined
+
+  return {
+    url: worldAssetUrl(slug, png),
+    cellSize,
+    cols,
+    rows,
+    origin: [origin[0] as number, origin[1] as number],
+    standableArea: number(parsed.standable_area) ?? 0,
+    walkableArea: number(parsed.walkable_area) ?? 0,
+    // Absent in maps built before the grid was measured in metres; those were
+    // measured at an effective scale of 1. A zero or negative value on disk is
+    // treated the same way rather than propagated into a division.
+    metricScaleFactor: (number(parsed.metric_scale_factor) ?? 0) > 0
+      ? (number(parsed.metric_scale_factor) as number)
+      : 1,
+  }
+}
+
 function readWorldManifest(slug: string) {
   const worldDir = path.join(worldsDir, slug, 'output', 'world')
   const files = visibleFiles(worldDir)
@@ -422,6 +516,8 @@ function withLocalWorldAssets(slug: string, world: WorldManifest, index?: number
   const collider = worldAssetFilename(files, index, 'world', MODEL_EXTENSIONS)
   const pano = worldAssetFilename(files, index, 'world-pano', IMAGE_EXTENSIONS)
   const thumbnail = worldAssetFilename(files, index, 'world-thumbnail', IMAGE_EXTENSIONS)
+  const props = readWorldProps(slug, files, index)
+  const walkable = readWorldWalkable(slug, files, index)
 
   return {
     world_id: (world.world_id as string) ?? slug,
@@ -449,6 +545,8 @@ function withLocalWorldAssets(slug: string, world: WorldManifest, index?: number
           ...((world.assets?.splats?.semantics_metadata ?? {}) as Record<string, unknown>),
         },
       },
+      ...(props ? { props } : {}),
+      ...(walkable ? { walkable } : {}),
     },
   }
 }

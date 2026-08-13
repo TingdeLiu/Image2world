@@ -15,6 +15,7 @@ import {
 import { useRouter } from 'next/navigation'
 import { AppButton } from './AppButton'
 import { MARBLE_KEYS_URL, REPO_URL } from '../utils/links'
+import { APP_REQUEST_HEADERS } from '../utils/sameOrigin'
 
 type BackendStatus = 'checking' | 'ready' | 'offline'
 type GenerationStage = 'initializing' | 'uploading' | 'sfm' | 'training' | 'exporting' | 'splat' | 'finalizing'
@@ -371,7 +372,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
     })
     const finalResponse = await fetch('/api/video-reconstruction/finalize', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...APP_REQUEST_HEADERS },
       body: JSON.stringify({ jobId: job.id, name }),
       signal,
     })
@@ -427,6 +428,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
 
         const res = await fetch('/api/generate', {
           method: 'POST',
+          headers: APP_REQUEST_HEADERS,
           body: formData,
           signal: generationController.signal,
         })

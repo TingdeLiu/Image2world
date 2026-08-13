@@ -26,7 +26,8 @@ import { useRouter } from 'next/navigation'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset, WorldSceneProject } from '../types/world'
 import { type ControllerMode, useDebugStore } from '../store/debug'
 import { useAudioStore } from '../store/audio'
-import { LOCAL_TOOLS_ENABLED } from '../utils/localTools'
+import { LOCAL_TOOLS_VISIBLE } from '../utils/localTools'
+import { APP_REQUEST_HEADERS } from '../utils/sameOrigin'
 import { REPO_URL } from '../utils/links'
 import { ViewerQuality } from '../types/world'
 import { AppButton } from './AppButton'
@@ -92,7 +93,7 @@ export function WorldSidebar({
   const setButterfliesEnabled = useDebugStore((s) => s.setButterfliesEnabled)
   // These open a file manager or terminal on whichever machine runs the server,
   // so they follow the same gate as the routes behind them.
-  const canOpenLocalFolders = LOCAL_TOOLS_ENABLED
+  const canOpenLocalFolders = LOCAL_TOOLS_VISIBLE
 
   const [createModalOpen, setCreateModalOpen] = useState(false)
 
@@ -125,13 +126,13 @@ export function WorldSidebar({
   }
 
   const openClaudeTerminal = () => {
-    fetch('/api/open-claude-terminal').catch((error) => {
+    fetch('/api/open-claude-terminal', { headers: APP_REQUEST_HEADERS }).catch((error) => {
       console.warn('Could not open Claude terminal.', error)
     })
   }
 
   const openWorldFolder = (slug: string) => {
-    fetch(`/api/open-world-folder?slug=${encodeURIComponent(slug)}`).catch((error) => {
+    fetch(`/api/open-world-folder?slug=${encodeURIComponent(slug)}`, { headers: APP_REQUEST_HEADERS }).catch((error) => {
       console.warn(`Could not open world folder for "${slug}".`, error)
     })
   }
@@ -139,7 +140,7 @@ export function WorldSidebar({
   const openAssetFolder = (slug: string, target: 'scene' | 'world-asset' | 'object-asset', asset?: string) => {
     const params = new URLSearchParams({ slug, target })
     if (asset) params.set('asset', asset)
-    fetch(`/api/open-world-folder?${params.toString()}`).catch((error) => {
+    fetch(`/api/open-world-folder?${params.toString()}`, { headers: APP_REQUEST_HEADERS }).catch((error) => {
       console.warn(`Could not open ${target} folder for "${slug}".`, error)
     })
   }
