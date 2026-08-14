@@ -5,9 +5,11 @@ import { RigidBody } from '@react-three/rapier'
 import { useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import { useAssetMaterials } from '../scene/useAssetMaterials'
+import { shadowCatcherColor, shadowCatcherOpacity } from '../scene/shadows'
 import { retainGltfResource } from '../../utils/threeResourceLifecycle'
 import { ObjectRenderMode } from '../../types/world'
 import type { WorldProps as WorldPropsData } from '../../types/world'
+import { worldTransform } from './worldTransform'
 
 interface Props {
   data: WorldPropsData
@@ -16,6 +18,8 @@ interface Props {
   groundPlaneOffset?: number
   metricScaleFactor?: number
   renderMode: ObjectRenderMode
+  shadowOpacity?: number
+  shadowColor?: string
 }
 
 /**
@@ -37,12 +41,32 @@ export function WorldProps({
   groundPlaneOffset,
   metricScaleFactor,
   renderMode,
+  shadowOpacity,
+  shadowColor,
 }: Props) {
   const { scene: rawScene } = useGLTF(data.url)
   const { wireframeMaterial, shadedMaterial } = useAssetMaterials()
-  const normalizedRotation = rotationX ?? (flipY ? Math.PI : 0)
-  const normalizedGroundPlaneOffset = groundPlaneOffset ?? 0
-  const normalizedMetricScaleFactor = metricScaleFactor ?? 1
+  // The same object `WorldCollider` and `SplatRenderer` spread, so a prop
+  // cannot end up in a different place from the room it was carved out of.
+  const transform = worldTransform({ flipY, rotationX, groundPlaneOffset, metricScaleFactor })
+
+  /**
+   * Lit mode has to be invisible, exactly as it is for the collision mesh.
+   *
+   * A prop is a hull cut from the room's own gaussians, and those gaussians are
+   * still being drawn. Painting the hull opaque on top of them puts a grey shell
+   * over the very object it was carved from -- the reason this component draws
+   * nothing in the default view and only shows up in the debug modes. Casting
+   * and receiving shadows still works, so a prop that moves takes its shadow
+   * with it.
+   */
+  const shadowMat = useMemo(() => new THREE.ShadowMaterial({
+    color: shadowCatcherColor(shadowColor),
+    opacity: shadowCatcherOpacity(shadowOpacity),
+    transparent: true,
+    depthWrite: false,
+  }), [shadowColor, shadowOpacity])
+  useEffect(() => () => shadowMat.dispose(), [shadowMat])
 
   useEffect(
     () => retainGltfResource(`props:${data.url}`, rawScene, () => useGLTF.clear(data.url)),
@@ -74,18 +98,23 @@ export function WorldProps({
   }, [data.props, rawScene])
 
   useEffect(() => {
-    const material = renderMode === ObjectRenderMode.Wireframe ? wireframeMaterial : shadedMaterial
+    const material = renderMode === ObjectRenderMode.Lit ? shadowMat
+      : renderMode === ObjectRenderMode.ShadedWireframe ? shadedMaterial
+      : wireframeMaterial
     for (const { mesh } of bodies) {
       mesh.material = material
       mesh.material.needsUpdate = true
     }
-  }, [bodies, renderMode, shadedMaterial, wireframeMaterial])
+  }, [bodies, renderMode, shadedMaterial, shadowMat, wireframeMaterial])
 
   return (
     <>
       {bodies.map(({ prop, mesh }) => (
         <RigidBody
-          key={prop.id}
+          // The scale belongs in the key: a hull collider is computed once at
+          // mount from the geometry as it stands then, so rescaling the world
+          // would otherwise leave the prop's physics shape behind its mesh.
+          key={`${prop.id}:${transform.scale[0]}`}
           type="dynamic"
           colliders="hull"
           mass={prop.mass}
@@ -95,9 +124,7 @@ export function WorldProps({
           restitution={0}
           linearDamping={0.4}
           angularDamping={0.6}
-          rotation={[normalizedRotation, 0, 0]}
-          position={[0, normalizedGroundPlaneOffset, 0]}
-          scale={[normalizedMetricScaleFactor, normalizedMetricScaleFactor, normalizedMetricScaleFactor]}
+          {...transform}
         >
           <primitive object={mesh} />
         </RigidBody>

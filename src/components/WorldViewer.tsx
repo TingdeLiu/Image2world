@@ -348,6 +348,8 @@ export function WorldViewer({
                     groundPlaneOffset={activeGroundPlaneOffset}
                     metricScaleFactor={activeMetricScaleFactor}
                     renderMode={objectRenderMode}
+                    shadowOpacity={activeShadowCatcherOpacity}
+                    shadowColor={activeShadowCatcherColor}
                   />
                 </Suspense>
               </OptionalAssetBoundary>

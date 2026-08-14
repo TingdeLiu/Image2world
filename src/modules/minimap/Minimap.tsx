@@ -144,10 +144,15 @@ export function Minimap({
   const height = aspect >= 1 ? SIZE / aspect : SIZE
 
   return (
-    /* Bottom left, not bottom right: the source-image panel owns that corner
-       and is 384px square, which covered the minimap completely. Sitting above
-       the mode buttons here depends on nothing but its own height. */
-    <div className={`${chrome.enter} pointer-events-none fixed bottom-16 left-3 z-30 hidden md:block`}>
+    /* Bottom edge, but clear of both corners, because both are taken.
+       Bottom right is the 384px source-image panel, which covered this
+       completely. Bottom left is the world sidebar: `left-4` plus `w-64` plus
+       `max-h-[80vh]` means its bottom edge sits at `0.8vh + 16`, and this panel
+       starts at `vh - 208`, so the two overlap on any viewport shorter than
+       1120px -- which is to say, on a laptop, always. Starting past the
+       sidebar's 272px right edge is the only position that depends on nothing
+       but a width that is already fixed. */
+    <div className={`${chrome.enter} pointer-events-none fixed bottom-16 left-[18rem] z-30 hidden md:block`}>
       <div
         className={`${chrome.bar} relative overflow-hidden p-1.5`}
         style={{ width: width + 12, height: height + 12, visibility: ready ? 'visible' : 'hidden' }}
