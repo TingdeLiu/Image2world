@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Tooltip } from '@radix-ui/themes'
 import {
   ArrowCounterClockwise,
@@ -21,6 +22,7 @@ import {
   Square as SquareIcon,
   TerminalWindow as TerminalWindowIcon,
   Plus,
+  Trash as TrashIcon,
 } from '@phosphor-icons/react'
 import { useRouter } from 'next/navigation'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset, WorldSceneProject } from '../types/world'
@@ -62,6 +64,8 @@ interface Props {
   onObjectHover?: (asset: WorldObjectAsset, hovering: boolean, instanceId?: string) => void
   onWorldHover?: (preview: WorldHoverPreview, hovering: boolean) => void
   onActiveWorldVersionChange: (index: number) => void
+  /** Re-read the library after it changes on disk. */
+  onWorldsChanged?: () => void | Promise<void>
 }
 
 
@@ -85,6 +89,7 @@ export function WorldSidebar({
   onObjectHover,
   onWorldHover,
   onActiveWorldVersionChange,
+  onWorldsChanged,
 }: Props) {
   const router = useRouter()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -96,6 +101,63 @@ export function WorldSidebar({
   const canOpenLocalFolders = LOCAL_TOOLS_VISIBLE
 
   const [createModalOpen, setCreateModalOpen] = useState(false)
+
+  /**
+   * Right-clicking a world offers to delete it.
+   *
+   * Two steps rather than one, because this is not undoable and a world is
+   * hundreds of megabytes that may have cost real money to generate. The
+   * confirm names the world, so a mis-aimed right click has to be confirmed
+   * against something the user can read.
+   */
+  const [worldMenu, setWorldMenu] = useState<{ slug: string; x: number; y: number } | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+
+  const closeWorldMenu = () => {
+    setWorldMenu(null)
+    setConfirmingDelete(false)
+    setDeleteError(null)
+  }
+
+  useEffect(() => {
+    if (!worldMenu) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeWorldMenu()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [worldMenu])
+
+  const deleteWorld = async (slug: string) => {
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      const response = await fetch(`/api/worlds?slug=${encodeURIComponent(slug)}`, {
+        method: 'DELETE',
+        headers: APP_REQUEST_HEADERS,
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}))
+        throw new Error(body.error || `Could not delete this world (HTTP ${response.status}).`)
+      }
+      closeWorldMenu()
+      // Leaving the user standing in a world that no longer exists would load a
+      // broken page, so move to a neighbour first and only then re-read.
+      if (slug === activeSlug) {
+        const next = worlds.find((world) => world.slug !== slug)
+        router.push(next ? `/${next.slug}` : '/')
+      }
+      // Not `router.refresh()`: the library lives in `LoadedApp`'s state, seeded
+      // from props once, so refreshing the server payload leaves the list alone.
+      await onWorldsChanged?.()
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : 'Could not delete this world.')
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   const shareWorld = async () => {
     const activeWorld = worlds.find((world) => world.slug === activeSlug)
@@ -119,6 +181,10 @@ export function WorldSidebar({
       console.warn('Could not share this world.', error)
     }
   }
+
+  const menuWorldName = worldMenu
+    ? worlds.find((world) => world.slug === worldMenu.slug)?.project.display_name ?? worldMenu.slug
+    : ''
 
   const selectWorld = (slug: string) => {
     router.push(`/${slug}`)
@@ -263,6 +329,13 @@ export function WorldSidebar({
                     }}
                     onMouseLeave={() => {
                       if (!isActive) onWorldHover?.(sourcePreview, false)
+                    }}
+                    onContextMenu={(event) => {
+                      if (!canOpenLocalFolders) return
+                      event.preventDefault()
+                      setConfirmingDelete(false)
+                      setDeleteError(null)
+                      setWorldMenu({ slug, x: event.clientX, y: event.clientY })
                     }}
                   >
                     <AppButton
@@ -468,6 +541,65 @@ export function WorldSidebar({
       </div>}
 
       <CreateWorldModal open={createModalOpen} onClose={() => setCreateModalOpen(false)} />
+      {worldMenu && createPortal((
+        <div
+          className="fixed inset-0 z-[60]"
+          onPointerDown={closeWorldMenu}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            closeWorldMenu()
+          }}
+        >
+          <div
+            role="menu"
+            aria-label={`Actions for ${menuWorldName}`}
+            className={`${chrome.panel} absolute w-60 p-1 text-sm`}
+            style={{
+              left: Math.min(worldMenu.x, (typeof window === 'undefined' ? 0 : window.innerWidth) - 252),
+              top: Math.min(worldMenu.y, (typeof window === 'undefined' ? 0 : window.innerHeight) - 168),
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="truncate px-2 py-1 font-mono text-xs text-white/50">{menuWorldName}</div>
+
+            {!confirmingDelete ? (
+              <AppButton
+                onClick={() => setConfirmingDelete(true)}
+                className="w-full justify-start gap-2 rounded px-2 py-2 text-left text-white hover:bg-red-500/25"
+              >
+                <TrashIcon size={15} weight="regular" />
+                <span>Delete world</span>
+              </AppButton>
+            ) : (
+              <div className="flex flex-col gap-1 px-2 py-1">
+                <p className="whitespace-normal text-xs leading-snug text-white/75">
+                  Delete this world and everything in it? The files are removed from disk and
+                  cannot be recovered.
+                </p>
+                <div className="mt-1 flex gap-1">
+                  <AppButton
+                    onClick={() => void deleteWorld(worldMenu.slug)}
+                    className="flex-1 justify-center rounded bg-red-500/25 py-1.5 text-white hover:bg-red-500/40"
+                  >
+                    {deleting ? <LoadingSpinner /> : 'Delete'}
+                  </AppButton>
+                  <AppButton
+                    onClick={closeWorldMenu}
+                    className="flex-1 justify-center rounded py-1.5 text-white"
+                  >
+                    Cancel
+                  </AppButton>
+                </div>
+              </div>
+            )}
+
+            {deleteError && (
+              <p className="whitespace-normal px-2 py-1 text-xs leading-snug text-red-300">{deleteError}</p>
+            )}
+          </div>
+        </div>
+      ), document.body)}
+
     </aside>
   )
 }

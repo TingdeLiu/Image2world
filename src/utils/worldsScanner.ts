@@ -600,10 +600,28 @@ function readWorldVersions(slug: string): WorldVersion[] {
   })
 }
 
-export function sceneProjectPath(slug: string): string | null {
+/**
+ * Slugs this app makes, and the only shape it will act on.
+ *
+ * `createWorldSlug` emits `name-abc123`: lower-case, digits and hyphens, always
+ * a single path segment. Checking the shape first means the traversal guard
+ * below is a second line rather than the only one -- worth having now that a
+ * slug can name a directory to delete, not just one to read.
+ */
+const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/i
+
+/** A world's own directory, or null if the slug is not one we would have made. */
+export function worldDirPath(slug: string): string | null {
+  if (!SLUG_PATTERN.test(slug)) return null
   const worldDir = path.resolve(worldsDir, slug)
   const isInsideWorlds = worldDir !== worldsDir && worldDir.startsWith(`${worldsDir}${path.sep}`)
   if (!isInsideWorlds) return null
+  return worldDir
+}
+
+export function sceneProjectPath(slug: string): string | null {
+  const worldDir = worldDirPath(slug)
+  if (!worldDir) return null
   return path.join(worldDir, 'scene.json')
 }
 

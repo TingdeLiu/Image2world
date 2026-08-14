@@ -444,6 +444,7 @@ export function LoadedApp({
               ...versions,
               [entry.slug]: index,
             }))}
+            onWorldsChanged={refreshWorlds}
           />
         </div>
       )}
