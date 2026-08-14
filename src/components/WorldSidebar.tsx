@@ -112,13 +112,16 @@ export function WorldSidebar({
    */
   const [worldMenu, setWorldMenu] = useState<{ slug: string; x: number; y: number } | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [menuBusy, setMenuBusy] = useState(false)
+  const [menuError, setMenuError] = useState<string | null>(null)
 
   const closeWorldMenu = () => {
     setWorldMenu(null)
     setConfirmingDelete(false)
-    setDeleteError(null)
+    setRenaming(false)
+    setMenuError(null)
   }
 
   useEffect(() => {
@@ -131,8 +134,8 @@ export function WorldSidebar({
   }, [worldMenu])
 
   const deleteWorld = async (slug: string) => {
-    setDeleting(true)
-    setDeleteError(null)
+    setMenuBusy(true)
+    setMenuError(null)
     try {
       const response = await fetch(`/api/worlds?slug=${encodeURIComponent(slug)}`, {
         method: 'DELETE',
@@ -153,9 +156,38 @@ export function WorldSidebar({
       // from props once, so refreshing the server payload leaves the list alone.
       await onWorldsChanged?.()
     } catch (error) {
-      setDeleteError(error instanceof Error ? error.message : 'Could not delete this world.')
+      setMenuError(error instanceof Error ? error.message : 'Could not delete this world.')
     } finally {
-      setDeleting(false)
+      setMenuBusy(false)
+    }
+  }
+
+  const renameWorld = async (slug: string, name: string) => {
+    const wanted = name.trim()
+    if (!wanted) return
+    setMenuBusy(true)
+    setMenuError(null)
+    try {
+      const response = await fetch(`/api/worlds?slug=${encodeURIComponent(slug)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...APP_REQUEST_HEADERS },
+        body: JSON.stringify({ name: wanted }),
+      })
+      const body = await response.json().catch(() => ({})) as { slug?: string; error?: string }
+      if (!response.ok) {
+        throw new Error(body.error || `Could not rename this world (HTTP ${response.status}).`)
+      }
+      closeWorldMenu()
+      // The slug is the URL, so renaming the world the user is standing in
+      // moves them; staying put would ask the router for a world that is gone.
+      if (slug === activeSlug && body.slug && body.slug !== slug) {
+        router.push(`/${body.slug}`)
+      }
+      await onWorldsChanged?.()
+    } catch (error) {
+      setMenuError(error instanceof Error ? error.message : 'Could not rename this world.')
+    } finally {
+      setMenuBusy(false)
     }
   }
 
@@ -334,7 +366,9 @@ export function WorldSidebar({
                       if (!canOpenLocalFolders) return
                       event.preventDefault()
                       setConfirmingDelete(false)
-                      setDeleteError(null)
+                      setRenaming(false)
+                      setRenameValue(slug)
+                      setMenuError(null)
                       setWorldMenu({ slug, x: event.clientX, y: event.clientY })
                     }}
                   >
@@ -556,21 +590,42 @@ export function WorldSidebar({
             className={`${chrome.panel} absolute w-60 p-1 text-sm`}
             style={{
               left: Math.min(worldMenu.x, (typeof window === 'undefined' ? 0 : window.innerWidth) - 252),
-              top: Math.min(worldMenu.y, (typeof window === 'undefined' ? 0 : window.innerHeight) - 168),
+              top: Math.min(worldMenu.y, (typeof window === 'undefined' ? 0 : window.innerHeight) - 210),
             }}
             onPointerDown={(event) => event.stopPropagation()}
           >
             <div className="truncate px-2 py-1 font-mono text-xs text-white/50">{menuWorldName}</div>
 
-            {!confirmingDelete ? (
-              <AppButton
-                onClick={() => setConfirmingDelete(true)}
-                className="w-full justify-start gap-2 rounded px-2 py-2 text-left text-white hover:bg-red-500/25"
-              >
-                <TrashIcon size={15} weight="regular" />
-                <span>Delete world</span>
-              </AppButton>
-            ) : (
+            {renaming ? (
+              <div className="flex flex-col gap-1 px-2 py-1">
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(event) => setRenameValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter') return
+                    event.preventDefault()
+                    void renameWorld(worldMenu.slug, renameValue)
+                  }}
+                  aria-label="New world name"
+                  className="w-full rounded border border-white/20 bg-black/40 px-2 py-1 text-sm text-white outline-none focus:border-white/50"
+                />
+                <p className="whitespace-normal text-[11px] leading-snug text-white/45">
+                  This is the folder name and the address, so the link to this world changes.
+                </p>
+                <div className="mt-1 flex gap-1">
+                  <AppButton
+                    onClick={() => void renameWorld(worldMenu.slug, renameValue)}
+                    className="flex-1 justify-center rounded bg-white/15 py-1.5 text-white hover:bg-white/25"
+                  >
+                    {menuBusy ? <LoadingSpinner /> : 'Rename'}
+                  </AppButton>
+                  <AppButton onClick={closeWorldMenu} className="flex-1 justify-center rounded py-1.5 text-white">
+                    Cancel
+                  </AppButton>
+                </div>
+              </div>
+            ) : confirmingDelete ? (
               <div className="flex flex-col gap-1 px-2 py-1">
                 <p className="whitespace-normal text-xs leading-snug text-white/75">
                   Delete this world and everything in it? The files are removed from disk and
@@ -581,20 +636,37 @@ export function WorldSidebar({
                     onClick={() => void deleteWorld(worldMenu.slug)}
                     className="flex-1 justify-center rounded bg-red-500/25 py-1.5 text-white hover:bg-red-500/40"
                   >
-                    {deleting ? <LoadingSpinner /> : 'Delete'}
+                    {menuBusy ? <LoadingSpinner /> : 'Delete'}
                   </AppButton>
-                  <AppButton
-                    onClick={closeWorldMenu}
-                    className="flex-1 justify-center rounded py-1.5 text-white"
-                  >
+                  <AppButton onClick={closeWorldMenu} className="flex-1 justify-center rounded py-1.5 text-white">
                     Cancel
                   </AppButton>
                 </div>
               </div>
+            ) : (
+              <>
+                <AppButton
+                  onClick={() => {
+                    setRenameValue(worldMenu.slug)
+                    setRenaming(true)
+                  }}
+                  className="w-full justify-start gap-2 rounded px-2 py-2 text-left text-white hover:bg-white/10"
+                >
+                  <PencilSimpleIcon size={15} weight="regular" />
+                  <span>Rename</span>
+                </AppButton>
+                <AppButton
+                  onClick={() => setConfirmingDelete(true)}
+                  className="w-full justify-start gap-2 rounded px-2 py-2 text-left text-white hover:bg-red-500/25"
+                >
+                  <TrashIcon size={15} weight="regular" />
+                  <span>Delete world</span>
+                </AppButton>
+              </>
             )}
 
-            {deleteError && (
-              <p className="whitespace-normal px-2 py-1 text-xs leading-snug text-red-300">{deleteError}</p>
+            {menuError && (
+              <p className="whitespace-normal px-2 py-1 text-xs leading-snug text-red-300">{menuError}</p>
             )}
           </div>
         </div>
