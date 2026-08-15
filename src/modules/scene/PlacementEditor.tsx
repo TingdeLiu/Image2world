@@ -24,7 +24,8 @@ import * as THREE from 'three'
 import { AppButton } from '../../components/AppButton'
 import { ChromePanel, ChromeThumbnail, chrome } from '../../components/AppChrome'
 import { ObjectRenderMode, type WorldObjectAsset, type WorldObjectPhysics, type WorldObjectPlacement, type WorldSceneProject, type WorldSceneSun } from '../../types/world'
-import { LOCAL_TOOLS_ENABLED } from '../../utils/localTools'
+import { LOCAL_TOOLS_VISIBLE } from '../../utils/localTools'
+import { APP_REQUEST_HEADERS } from '../../utils/sameOrigin'
 import { OBJECT_SCALE, getInitialPlacements } from './placements'
 import { DROP_TARGET_LAYER } from './dropTargets'
 import { useSceneObjectVisual } from './useSceneObjectVisual'
@@ -1042,7 +1043,7 @@ export function usePlacementEditor({
   }, [baseline, updateInstances])
 
   const openWorldFolder = useCallback(() => {
-    fetch(`/api/open-world-folder?slug=${encodeURIComponent(slug)}&target=scene`).catch((error) => {
+    fetch(`/api/open-world-folder?slug=${encodeURIComponent(slug)}&target=scene`, { headers: APP_REQUEST_HEADERS }).catch((error) => {
       console.warn(`Could not open scene folder for "${slug}".`, error)
     })
   }, [slug])
@@ -1063,7 +1064,7 @@ export function usePlacementEditor({
       setSaveStatus('saving')
       const response = await fetch(`/api/scene-project?slug=${encodeURIComponent(slug)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...APP_REQUEST_HEADERS },
         body: JSON.stringify(project),
       })
       if (!response.ok) throw new Error(await response.text())
@@ -1125,7 +1126,7 @@ export function usePlacementEditor({
     }
     fetch(`/api/scene-project?slug=${encodeURIComponent(slug)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...APP_REQUEST_HEADERS },
       body: JSON.stringify(project),
     })
       .then(async (response) => {
@@ -1733,7 +1734,7 @@ export function PlacementEditorOverlay({ controller }: PlacementEditorOverlayPro
                 >
                   <FloppyDisk size={16} weight="regular" />
                 </AppButton>
-                {LOCAL_TOOLS_ENABLED && (
+                {LOCAL_TOOLS_VISIBLE && (
                   <AppButton
                     className="h-7 w-7 justify-center p-1"
                     onClick={controller.openWorldFolder}

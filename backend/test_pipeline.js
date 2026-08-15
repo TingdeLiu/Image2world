@@ -24,6 +24,9 @@ async function test() {
   try {
     const res = await fetch('http://localhost:3000/api/generate', {
       method: 'POST',
+      // The route only accepts calls that came from the app's own pages; a
+      // cross-site POST cannot set this header without failing a preflight.
+      headers: { 'x-imageworld-app': '1' },
       body: formData,
     });
 

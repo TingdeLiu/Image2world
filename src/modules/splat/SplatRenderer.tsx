@@ -5,6 +5,8 @@ import { extend, useThree, useFrame } from '@react-three/fiber'
 import { SplatMesh, SparkRenderer } from '@sparkjsdev/spark'
 import * as THREE from 'three'
 import { useDebugStore } from '../../store/debug'
+import { worldTransform } from '../collider/worldTransform'
+import { silenceSplatWorkerTeardown } from './workerTeardown'
 import { ViewerQuality } from '../../types/world'
 
 // Patch Spark's default vertex shader to swap the linear thin-lens CoC formula
@@ -100,6 +102,11 @@ export function SplatRenderer({
       }
     })
 
+    // Installed from here rather than from the app shell because it is Spark's
+    // teardown that needs silencing, and this is the only component that mounts
+    // one. See `workerTeardown.ts`.
+    useEffect(silenceSplatWorkerTeardown, [])
+
     useEffect(() => {
       if (splatRef.current) splatRef.current.raycast = ignoreRaycast
       if (sparkRef.current) sparkRef.current.raycast = ignoreRaycast
@@ -140,9 +147,13 @@ export function SplatRenderer({
       [onProgress, url],
     )
 
+    // The same object `WorldCollider` spreads onto its rigid bodies, so the
+    // gaussians and the collision mesh cannot end up in different places.
+    const transform = worldTransform({ flipY, rotationX, groundPlaneOffset, metricScaleFactor })
+
     return (
       <SparkRendererEl ref={sparkRef} args={[sparkArgs]} visible={visible}>
-        <group position={[0, groundPlaneOffset, 0]} rotation={[rotationX ?? (flipY ? Math.PI : 0), 0, 0]} scale={metricScaleFactor}>
+        <group {...transform}>
           <SplatMeshEl ref={splatRef} args={[splatArgs]} />
         </group>
       </SparkRendererEl>

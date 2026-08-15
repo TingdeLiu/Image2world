@@ -9,7 +9,7 @@
       },
       "semantics_metadata": {
         "metric_scale_factor": 1.1314163,
-        "ground_plane_offset": 1.3834634,
+        "ground_plane_offset": 1.375,
         "flip_y": true
       }
     }

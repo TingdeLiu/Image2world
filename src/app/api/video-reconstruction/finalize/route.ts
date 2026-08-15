@@ -2,6 +2,8 @@ import fs from 'fs'
 import path from 'path'
 import { NextRequest, NextResponse } from 'next/server'
 import { createBinaryPlyLod } from '../../../../utils/plyLod'
+import { isAppRequest } from '../../../../utils/sameOrigin'
+import { buildWalkableMap } from '../../../../utils/walkableMap'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 900
@@ -145,6 +147,12 @@ async function buildCollider(worldOutDir: string) {
 }
 
 export async function POST(request: NextRequest) {
+  // Publishes a finished reconstruction into `public/worlds`, which means
+  // writing hundreds of megabytes and claiming a slug. Same-origin only.
+  if (!isAppRequest(request)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
   let payload: { jobId?: string; name?: string }
   try {
     payload = await request.json() as { jobId?: string; name?: string }
@@ -285,6 +293,23 @@ export async function POST(request: NextRequest) {
         ...(typeof initialYaw === 'number' && Number.isFinite(initialYaw) ? { spawnYaw: initialYaw } : {}),
         ...(typeof initialPitch === 'number' && Number.isFinite(initialPitch) ? { spawnPitch: initialPitch } : {}),
       }, null, 2))
+
+      // After the scale, not before: `metricScaleFactor` is calculated from the
+      // collider's own floor height, so the grid could not have been measured
+      // in metres during the collider pass. The spawn is what makes the
+      // difference here -- a video world covers ground the walker cannot reach,
+      // and flooding from the camera's actual start is the only way to say so.
+      await buildWalkableMap(
+        AI_BACKEND_URL,
+        worldOutDir,
+        {
+          rotationX: NERFSTUDIO_ROTATION_X,
+          metricScale: metricScaleFactor,
+          spawn: hasInitialPosition
+            ? [initialPosition[0] * metricScaleFactor, initialPosition[2] * metricScaleFactor]
+            : undefined,
+        },
+      )
 
       const ambienceDir = path.join(process.cwd(), 'public', 'assets', 'ambience')
       if (fs.existsSync(ambienceDir)) {

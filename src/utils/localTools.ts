@@ -8,10 +8,28 @@
  * local GPU, so the app is deployable.
  *
  * Enabled in development, off in production unless the operator opts back in
- * with NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true (for running a production build
- * on your own machine). The NEXT_PUBLIC_ prefix is what lets one expression
- * gate both the API routes and the buttons that call them.
+ * (for running a production build on their own machine).
+ *
+ * The two constants read different variables on purpose. Next inlines every
+ * `NEXT_PUBLIC_*` reference at build time -- in the server bundle too -- so a
+ * build machine that happened to have the flag set would bake `'true' ===
+ * 'true'` into the route handlers, and no runtime environment could switch the
+ * endpoints back off. The gate that actually protects the host therefore reads
+ * an unprefixed variable, which stays a real lookup at runtime; the prefixed
+ * one only decides whether buttons are drawn.
+ *
+ * Running a production build locally means setting both.
  */
 export const LOCAL_TOOLS_ENABLED =
+  process.env.NODE_ENV !== 'production' ||
+  process.env.IMAGEWORLD_LOCAL_TOOLS === 'true'
+
+/**
+ * Whether to render the buttons that call those routes.
+ *
+ * Client-side, so this one has to be `NEXT_PUBLIC_`. It is a display decision:
+ * showing a button whose route is disabled costs a 404, not an exposure.
+ */
+export const LOCAL_TOOLS_VISIBLE =
   process.env.NODE_ENV !== 'production' ||
   process.env.NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS === 'true'

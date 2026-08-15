@@ -341,6 +341,212 @@ Nerfstudio/gsplat 环境中联合优化。失败后可以分别用 `--reuse-sfm`
 
 ---
 
+## 🧱 碰撞体的表面分类（2026-08-12）
+
+`build_collider.py` 此前把整个房间导出成**一块** mesh，前端挂成单个
+`RigidBody colliders="trimesh"`——地板、墙、桌面共用一套摩擦系数。现在按"行走者
+会遇到什么"把面片拆成五类，每类一个 GLB 节点：
+
+| 类别 | 判据（viewer 空间） | 前端摩擦 | combine rule |
+| :--- | :--- | ---: | :--- |
+| `floor` | `ny ≥ 0.70` 且高度在地板 ±0.15 m | 1.0 | Max |
+| `elevated` | `ny ≥ 0.70` 且高于地板 0.15 m（桌面、台面） | 0.9 | Max |
+| `ramp` | `0.60 ≤ \|ny\| < 0.70` | 0.15 | Min |
+| `wall` | `\|ny\| < 0.60` | 0.02 | **Min** |
+| `ceiling` | `ny ≤ -0.70` | 0.02 | Min |
+
+**两个必须知道的点：**
+
+1. **阈值不能与地板检测共用。** `detect_floor_height` 一直用 `0.85`，它问的是
+   "这块够不够平，能不能算地板"；分类问的是另一个问题——"胶囊体能不能站住"，答案是
+   物理引擎通用的 ~45° 坡度极限。共用 `0.85` 时 **36% 的面积落进 `ramp`**，这个类
+   等于没有判别力。拆成 `WALKABLE_NORMAL=0.70` / `VERTICAL_NORMAL=0.60` 后，
+   三个世界实测 `ramp` 降到 **8.6–10.5%**：
+
+   | 世界 | floor | elevated | ramp | wall | ceiling |
+   | :--- | ---: | ---: | ---: | ---: | ---: |
+   | sunlit-office | 7.4% | 18.6% | 10.3% | 37.5% | 26.2% |
+   | multiview-meetingroom | 6.6% | 15.5% | 8.6% | 47.3% | 22.1% |
+   | bounded | 7.2% | 18.4% | 10.5% | 37.8% | 26.2% |
+
+   （**按面积**，不是按面数。quadric decimation 把平坦区域留成少量大三角形、把褶皱
+   区域留成大量小三角形，按面数统计会得出完全相反的结论。）
+
+2. **`wall` 的 combine rule 比系数更重要。** Rapier 默认把两个 collider 的摩擦
+   取平均，0.02 的墙撞上角色胶囊（默认 0.5）实际解算成 **0.26**，照样刮住玩家。
+   只有 `Min` 才让低系数真正生效。
+
+**已经试过且无效的方向**：用 `face_adjacency` 平滑法线再分类。实测 `ramp` 从 35.9%
+**涨到** 36.5%——相邻的阶梯面互相拉平，反而更糊。不要重试。
+
+向后兼容：旧世界的 collider 是单个 `geometry_0` 节点，前端 `surfaceMeshes()` 返回空
+数组并退回原来的整体碰撞路径。**要让旧世界用上分类，必须重跑一次 collider。**
+
+体积代价：GLB 从 1.00 MB 涨到 1.44 MB（顶点在类别边界处被复制）。
+
+回归测试（纯几何，不需要 GPU / 模型）：
+
+```bash
+python -m pytest backend/test_collider.py -q
+```
+
+前端侧的对应契约测试在 `src/modules/collider/surfaces.test.ts`，其中一条会真的用
+three 的 `GLTFLoader` 解析本机上已分类的世界 collider；没有世界数据时自动跳过。
+
+---
+
+## 🪑 可推动道具（`/api/extract-prop`，2026-08-12）
+
+把房间里的一件东西切出来，做成能被撞动的 dynamic 刚体。几何来自**世界自己的
+gaussians**，不是单图猜出来的模型——这与 2026-08-01 砍掉的 TripoSR 路线本质不同。
+
+### 为什么不能用连通分量
+
+最初的设想是"一把椅子自成一个连通分量"。三个世界实测**否掉了这个前提**：
+
+| 世界 | 最大分量占比 | 尺寸 | 第二大 |
+| :--- | ---: | :--- | ---: |
+| sunlit-office | **97.1%** | 6.95×2.70×10.60 m（= 整个房间） | 1.3% |
+| multiview-meetingroom | **90.3%** | 14.65×4.65×16.95 m | 2.4% |
+| bounded | **98.3%** | 6.70×2.55×10.20 m | 0.6% |
+
+站在地板上的东西在体素分辨率下与地板**焊死**，所以地板、墙、贴地家具是同一块。
+剩下的小分量里只有 2–3 个尺寸像家具，其余是 Y 向厚 0.05–0.15 m 的浮空碎片——
+把它们变成 dynamic 刚体只会让场景里飘着一堆会掉的垃圾。
+
+分割必须来自别处，于是有两条选区路径：
+
+- **`point`**：splat 空间的 `[x, y, z]`，投影回源图像素后交给 SAM 2 点提示分割。
+  边界精确，但 SAM 可能选错东西。
+- **`box`**：splat 空间的 `[[x,y,z],[x,y,z]]`。用户说了算，也是 SAM 选错时的兜底。
+
+两条路都归结为"一组 gaussian 索引"，之后的管线共用。
+
+### 深度门控：最容易做错的一步
+
+mask 覆盖的是**整条视线**，椅子背后的墙投影到完全相同的像素。不做门控，切出来的
+"椅子"会焊着一块墙。实现里有两个都被测试钉住的坑：
+
+1. **不能按峰高选。** 墙在图像里总比物体大，gaussian 数routinely 高一个量级。
+   实测 500 点的物体对 9000 点的墙，按峰高的阈值**直接跳过物体选中了墙**。改为
+   "切在第一段空隙"，因为空隙的存在与两边体量无关。
+2. **空隙宽度必须用米，不能用 bin 数。** bin 宽随选区跨度变化，"3 个空 bin"在跨米
+   的场景里是 15 cm，在单个表面上只有 6 mm——后者会把一个高斯峰的尾巴切掉。现在
+   要求空隙至少 `min_gap_metres=0.1`。
+
+两个表面贴在一起时没有空隙，**不会硬切**（返回 `inf` 保留整个选区），否则会把物体
+拦腰截断。
+
+### 产物与物理
+
+`<n>-world-props.glb` 一个节点一个 prop，`<n>-world-props.json` 记录质量与中心，
+两者按节点名配对。端点返回**合并后的完整 GLB**（`existing` 传入现有文件），所以
+Next.js 路由只搬字节、不需要 GLB 解析器；用同一个 `prop_id` 再切一次就是替换。
+
+质量按凸包体积 × 250 kg/m³（板材+软包的量级）估算，只求可信不求准确：太轻一推
+就飞，太重推不动。前端用 `colliders="hull"` 而非 trimesh——Rapier 的 dynamic
+trimesh 没有内部体积，质量属性无意义且高速接触会穿透。
+
+**未安装的依赖**：SAM 3（文本提示分割）与 coacd / vhacdx（凸分解）。当前用 SAM 2
+点提示 + 单凸包，够用；装上 SAM 3 可加文本提示，装上 coacd 可做凹形道具。
+
+### Web 端用法
+
+浏览器里进入某个世界（非编辑模式），点顶部的 **Free an object**，然后点房间里
+想推动的东西。整条链路是：
+
+```
+点击 → raycast(DROP_TARGET_LAYER) → worldToLocal → splat 空间坐标
+     → POST /api/extract-prop?slug=… （Next 读 PLY + 源图 + 现有 props GLB）
+     → FastAPI（投影回像素 → SAM 2 → mask → 提取 → 合并）
+     → 写回 GLB + JSON → 刷新世界
+```
+
+坐标交接是这里最容易错的一环：**collider 空间必须与 splat 空间严格一致**，
+`WorldCollider` 与 `SplatRenderer` 施加的是同一组 `rotationX / groundPlaneOffset /
+metricScaleFactor` 变换。两者若被改得不一致，提取仍会"成功"，只是悄悄从错误的位置
+切——`src/modules/scene/propExtractor.test.ts` 用 4 组变换把这个不变量钉住了。
+
+Next 路由只搬字节，不解析 GLB（合并在 Python 侧做），并对 slug 做路径遍历防护。
+
+回归测试（纯几何 + 合成相机，不需要 GPU / SAM）：
+
+```bash
+python -m pytest backend/test_props.py -q
+```
+
+---
+
+## 🗺️ 可行走区域与 minimap（2026-08-13）
+
+`build_collider.py` 现在顺带产出 `<n>-world-walkable.png`（白=可走）与同名 `.json`
+（格边长、网格尺寸、viewer 空间原点、面积）。三道过滤，第三道才是重点：
+
+1. **能站**：只取分类为 `floor` / `elevated` 的面，坡度已在 45° 以内
+2. **站得直**：头顶间隙 ≥ 1.6 m（`CHARACTER_HEIGHT`），桌子底下不算
+3. **走得到**：从出生点洪水填充
+
+**第三道是这个功能存在的理由。** 单视角重建留下大量够得着却走不到的碎片，把它们画成
+可走区域，等于在最该警告"前面是虚空"的地方给出一张骗人的地图。实测：
+
+| 世界 | 能站 | 走得到 | 不可达 |
+| :--- | ---: | ---: | ---: |
+| sunlit-office | 21.9 m² | 19.8 m² | 9.6% |
+| **multiview-meetingroom** | 75.3 m² | 25.5 m² | **66.2%** |
+| bounded | 21.3 m² | 20.1 m² | 5.7% |
+
+多视图那个 66.2% 不是 bug：覆盖更广的同时也更碎。这个数字本身就是"走进虚空"问题的
+第一次量化。
+
+**两个踩过的坑：**
+
+1. **不能用 `triangles_center` 网格化。** quadric decimation 把平坦区域留成少量大
+   三角形——真实房间里最平的 4% 面片承载 38% 面积——一个三角形只落一个格子会把地板
+   大部分丢掉，实测直接得出 0 m²。改为按面积采样（每格约 4 个采样点）。
+2. **可达面积不能大于可站面积。** despeckle 的 `binary_closing` 会填洞并向外扩张，
+   实测报出 **-13.8% 不可达**这种不可能的数字。closing 仍用于让洪水填充跨过噪声孔洞，
+   但最终结果必须与原始网格取交集——洞不是能站的地方。
+
+回归测试（纯网格逻辑，不需要 GPU）：
+
+```bash
+python -m pytest backend/test_walkable.py -q
+```
+
+前端 `Minimap.tsx`（**左下角**，右下角被源图缩略图占着）把灰度图重新着色（不可达处透明而非暗色，否则看起来像"暗一点的
+地板"而不是"没有地板"），玩家位姿走 ref + `requestAnimationFrame`，不让每帧 60 次
+重渲染整个 overlay。
+
+---
+
+## 🔎 视觉验证怎么做（2026-08-13）
+
+in-app 浏览器面板隐藏时不渲染（`document.hidden = true`，canvas 无尺寸，资产不请求），
+本机 Chrome 又访问不了 `localhost:3000`（很可能是加速器/VPN 代理拦了本地流量）。
+**用 Playwright 自带的 Chromium**：
+
+```bash
+C:/Users/tingd/miniconda3/python.exe your_script.py   # base env 里装了 playwright
+```
+
+```python
+browser = p.chromium.launch(headless=True, args=[
+    "--enable-unsafe-swiftshader", "--use-gl=angle", "--use-angle=swiftshader",
+])
+```
+
+两个必须知道的点：
+
+1. **先切 Low 画质**。软件 WebGL 渲染 118 万 splat 会让 `page.screenshot()` 超时；
+   写 `localStorage['imageworld-debug']` 的 `state.viewerQuality = 'low'` 后 reload。
+2. **折叠 Leva**（`state.levaCollapsed = true`）。开发模式下它占满右侧，会盖住右上角与
+   右下角的 UI，让布局评估失真——生产环境没有它。
+
+这条路已经抓到过两个真 bug（minimap 被源图面板遮挡、玩家标记飞出视口），详见
+PROJECT_REPORT §3.18。
+
+---
+
 ## 🚀 启动服务
 
 启动本地推理服务：

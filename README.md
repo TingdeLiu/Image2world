@@ -135,8 +135,9 @@ conda activate image2world
 python backend/server.py
 ```
 
-The API is available at `http://localhost:8000`; interactive OpenAPI
-documentation is served at `http://localhost:8000/docs`.
+The API is available at `http://localhost:8000`, on loopback only. Interactive
+OpenAPI documentation is off by default — start with `IMAGEWORLD_DOCS=true` to
+serve it at `/docs`.
 
 ### 2. Start the web app
 
@@ -250,8 +251,13 @@ queue instead.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `IMAGEWORLD_BACKEND_URL` | `http://localhost:8000` | Address of the local FastAPI service |
-| `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS` | unset | Re-enables "open world folder" / "open terminal" in a production build |
+| `IMAGEWORLD_LOCAL_TOOLS` | unset | Re-opens the "open world folder" / "open terminal" **routes** in a production build |
+| `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS` | unset | Re-shows the **buttons** for them. Set both, or you get buttons that 404 |
 | `IMAGEWORLD_SEGMENTER` | `sam2` | Segmentation backend for the retired object endpoints; `sam3` adds semantic labels |
+| `IMAGEWORLD_BIND_HOST` | `127.0.0.1` | Which interfaces the backend listens on. `0.0.0.0` exposes it to your network |
+| `IMAGEWORLD_ALLOWED_ORIGINS` | unset | Extra browser origins allowed to write to the backend, comma-separated |
+| `IMAGEWORLD_DOCS` | unset | `true` serves the backend's `/docs` and `/openapi.json` |
+| `IMAGEWORLD_MAX_UPLOAD_BYTES` | `1073741824` | Per-request upload allowance for the backend |
 
 ```powershell
 $env:IMAGEWORLD_BACKEND_URL = "http://localhost:8000"
@@ -264,7 +270,20 @@ never holds anyone's credentials.
 
 > The local-tool routes spawn a file manager or a terminal **on whichever
 > machine runs the server**. They 404 in production for that reason. Only set
-> `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` when the server is your own machine.
+> `IMAGEWORLD_LOCAL_TOOLS=true` (plus the `NEXT_PUBLIC_` twin, to show the
+> buttons) when the server is your own machine. The two are separate because
+> Next inlines `NEXT_PUBLIC_*` at build time, so a single prefixed flag could
+> be baked into the server bundle and never turned off again.
+
+Both layers refuse writes that did not come from this app's own pages: the Next
+routes require a header no cross-site request can set without a preflight, and
+the backend rejects any non-`GET` carrying an unknown `Origin`. Requests with no
+`Origin` at all — curl, the Next server's own calls — still go through, since
+anything running locally can already reach the files directly.
+
+The backend binds loopback by default. Nothing there is authenticated, and a
+single request can occupy the GPU for hours, so it is not something to hand to a
+shared network without thinking about it first.
 
 The variable names keep the older `IMAGEWORLD_` spelling deliberately; renaming
 them would break existing configurations. Same for the browser storage keys.

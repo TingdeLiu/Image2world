@@ -129,7 +129,7 @@ Marble 的响应结构与本项目的 `WorldManifest` **完全一致**——这�
 | :--- | :--- |
 | `imageworld:marble-api-key`（localStorage） | 用户已保存的 API Key 消失 |
 | `imageworld-debug` / `imageworld-audio`（localStorage） | 所有本地设置被重置 |
-| `IMAGEWORLD_BACKEND_URL` / `_SEGMENTER` / `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS` | 已有环境配置失效 |
+| `IMAGEWORLD_BACKEND_URL` / `_SEGMENTER` / `_LOCAL_TOOLS` / `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS` | 已有环境配置失效 |
 | `imageworld:objectId` / `imageworld:physics`（USD 属性） | 已导出的 `.usda` 文件对不上 |
 
 **用户可见的一切显示名称都是 Image2World**；上述是内部键与数据格式，不对外呈现。
@@ -309,4 +309,4 @@ npm run check      # lint → typecheck → test → build
 
 ### 本地开发工具
 
-「打开世界文件夹」「打开终端」这类功能会在**运行服务端的机器上启动进程**。生产环境默认返回 404，需要时用 `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` 显式开启。
+「打开世界文件夹」「打开终端」这类功能会在**运行服务端的机器上启动进程**。生产环境默认返回 404，需要时用 `IMAGEWORLD_LOCAL_TOOLS=true` 开路由、`NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` 显示按钮，两个都要设。拆成两个是因为 Next 会在构建期把 `NEXT_PUBLIC_*` 内联进服务端 bundle，单一前缀变量可能被烤成常量、运行时再也关不掉。

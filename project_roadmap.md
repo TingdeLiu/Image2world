@@ -96,7 +96,7 @@ graph TD
 
 效果：端到端耗时 数分钟 → **43 秒**，参与推理的模型仅剩 SHARP。详见 PROJECT_REPORT §3.7。
 
-- [x] **本地开发工具部署门禁**：`/api/open-world-folder` 与 `/api/open-claude-terminal` 会在服务端机器上启动进程，生产环境默认返回 404（可用 `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` 显式开启）。因 BYOK 使项目变得可部署，该风险由理论转为现实。详见 PROJECT_REPORT §3.13。
+- [x] **本地开发工具部署门禁**：`/api/open-world-folder` 与 `/api/open-claude-terminal` 会在服务端机器上启动进程，生产环境默认返回 404（需同时设 `IMAGEWORLD_LOCAL_TOOLS=true` 开路由与 `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS=true` 显示按钮）。因 BYOK 使项目变得可部署，该风险由理论转为现实。详见 PROJECT_REPORT §3.13。
 
 ### 阶段三：全栈 SaaS 系统开发 (Weeks 5-6)
 - [ ] **用户与权限**：集成 Clerk 登录，开发管理控制台。
@@ -108,7 +108,11 @@ graph TD
 - [x] **前后端全流程联调**：用户上传图片 -> SHARP 重建场景 Splat -> 提取碰撞体与地面标定 -> 加载进 3D Viewer -> 自由漫游和编辑。
 - [ ] **加载与性能优化**：把 `.ply` 转为 **SPZ**（Spark 原生支持，体积约降一个数量级），首屏加载实现渐进式显示。当前单个世界 105 MB，其中 full_res PLY 占 64 MB。
 - [ ] **碰撞与漫游手感**：改善 collider 质量（补洞、去噪），优化行走碰撞响应与相机手感。
+  - [~] **可推动道具（`/api/extract-prop`）**：2026-08-12。把房间里的一件东西切成 dynamic 刚体，几何取自世界自己的 gaussians（与 2026-08-01 砍掉的 TripoSR 猜几何本质不同）。**原设想"连通分量=一件家具"被实测否掉**：三个世界里最大分量占 90–98%，站地上的东西在体素分辨率下与地板焊死，剩下的小分量多是浮空碎片。改为两条选区路径——SAM 2 点提示（精确但会选错）与手动 box（兜底），两条共用同一套下游。最难的是**深度门控**：mask 覆盖整条视线，不处理会把椅子背后的墙一起切出来；且不能按峰高选（墙的 gaussian 数常高一个量级，实测 500 vs 9000 时直接选中了墙），必须切在第一段空隙，且空隙宽度用米而非 bin 数。后端 + 渲染 + **web 端点选交互**均已完成并端到端实测（23 项后端测试、45 项前端测试）。浏览器里点顶部 **Free an object** 再点物体即可。坐标交接是最险的一环——collider 空间与 splat 空间不一致时提取仍会"成功"但切错位置，已用 4 组变换钉住不变量。详见 `backend/README.md` 与 PROJECT_REPORT §3.15。
+  - [x] **表面分类与分材质碰撞**：2026-08-12。碰撞体不再是一整块——按"行走者会遇到什么"拆成 `floor` / `elevated` / `ramp` / `wall` / `ceiling` 五个 GLB 节点，前端各建独立 `RigidBody` 并给不同摩擦（地板 1.0 抓地，墙面 0.02 让人贴墙滑过而非被拖住）。两个不显然的点：**分类阈值不能与地板检测共用**（共用 `0.85` 时 36% 面积落进 `ramp`，拆开后降到 8.6–10.5%，三世界一致）；**`wall` 的 combine rule 比系数更重要**（Rapier 默认取平均，0.02 的墙实际解算成 0.26，必须用 `Min`）。已试过并**无效**：平滑法线再分类，`ramp` 反而从 35.9% 涨到 36.5%，不要重试。旧世界需重跑 collider 才生效，否则自动退回原路径。详见 PROJECT_REPORT §3.14。
   - [x] **出生点落在房间内**：此前硬编码 `z=-0.5`，实测位于房间几何之外 2.1 m（拍照者本就站在被拍空间外，故原点天然在几何外）。现由 collider 包围盒推算并写入 `scene.json` 的 `spawnPoint`，旧世界回退兼容。详见 PROJECT_REPORT §3.8。
+  - [x] **可行走区域与 minimap**：2026-08-13。`build_collider.py` 顺带产出 walkable 掩码（能站 + 站得直 + **走得到**），前端 minimap（**左下角**——右下角被 384×384 的源图缩略图占着，最初放右下时被完全遮住）。第三道过滤是重点——单视角重建留下大量够得着走不到的碎片，画成可走区域等于在最该警告"前面是虚空"的地方给张骗人的地图。实测不可达比例：sunlit-office 9.6%、bounded 5.7%、**multiview-meetingroom 66.2%**（覆盖更广也更碎），这是"走进虚空"第一次被量化。两个坑：不能用 `triangles_center` 网格化（平坦区域=大三角形，地板几乎全漏，实测得出 0 m²）、可达面积不能大于可站面积（closing 填洞外扩，实测报出 −13.8% 这种自相矛盾数字）。详见 PROJECT_REPORT §3.17。
+  - [x] **视觉验证打通**：2026-08-13。in-app 面板不渲染、本机 Chrome 访问不了 localhost，改用 Playwright 自带 Chromium（软件 WebGL2）终于看到了实际画面。抓到两个真 bug：**minimap 被 384×384 的源图缩略图完全遮住**（注释写着"放左边"实际用了 `right-3`）、**玩家标记 `top:120%` 飞出视口**（玩家在可行走区外是单视角世界的开场常态，未 clamp）。另有一个看似 bug 实非 bug：屏幕正中心那条射线严格水平，与地板永不相交且该高度正前方无几何，实测命中 0，而上下都命中 1–4 个——点空是常态，已补明确反馈。详见 PROJECT_REPORT §3.18。
   - [~] **场景边界**：已实现后又回滚（commit `98737e5` → `d61bce3`）。实测从出生点扫描 24 个方向，**8 个完全没有身体高度的几何**，且全部集中在相机背后 135°–210°——单视角拍不到自己背后，碰撞体因此不闭合（`is_watertight=False`）。人工围栏能解决，但世界模型生成 360° 场景后碰撞体会自然闭合，围栏即成冗余，故不为过渡期保留该机制。
 - [x] **验证世界模型可行性（Marble 实测通过）**：2026-08-02 用 Marble API 生成一次，**封闭性 0/24 敞开**（SHARP 为 8/24）、地面面积 211 m²（SHARP 68 m²）、输出格式与本项目**原生兼容、前端零改动**。详见 PROJECT_REPORT §3.10。
 - [x] **接入世界模型（BYOK）**：生成弹窗新增可选的 Marble API Key 输入框，附 [获取入口](https://platform.worldlabs.ai/api-keys)。**填了走 Marble、没填走本地 SHARP**，两条管线并存。Key 存于浏览器 `localStorage`，随请求传递，服务端不落盘、不入日志、仅置于 `WLT-Api-Key` 请求头。商业上等于**用户自带算力**，产品不承担 API 成本。
@@ -129,6 +133,7 @@ graph TD
   - **多视图 SHARP**：零边际成本、几何真实（是实测而非生成），但要求用户拍视频而不是一张照片，且不填补遮挡
 - [ ] **SPZ 迁移**：Marble 实测印证 SPZ 单位 splat 体积约为 PLY 的 1/4（13.5 vs 53 bytes）。若改用 Marble，此项自动完成；若继续自部署，则需在管线尾部加转换。
 - [ ] **移动端适配**：优化手机端陀螺仪和触控操作，提升分享体验。
+  - [x] **上手提示与截图**：2026-08-13。此前第一次进世界**没有任何操作说明**（手机上摇杆要等你猜到拖左半屏之后才画出来）；现在按触屏/桌面分别提示一次，9 秒或首次输入后消失。另加截图按钮——注意 canvas 无 `preserveDrawingBuffer`，必须在同一同步块内 `gl.render()` 后立即 `toDataURL`，否则只得到空白图。动手前的现状核查还发现三项"缺口"其实已存在（摇杆可视化、加载进度、侧栏画质切换）。详见 PROJECT_REPORT §3.16。
 
 #### 2026-07-31 交付加固
 
@@ -138,6 +143,17 @@ graph TD
 - [x] 创建弹窗增加后端状态、内联错误、键盘关闭、焦点样式与手机端滚动；通过 portal 修复侧栏动画导致的移动端定位偏移。
 
 ### 阶段五：上线与商业化推广 (Week 9+)
+#### 2026-08-14 安全与单位加固
+
+- [x] **API 面的来源校验**：`/api/*` 此前**零来源校验**——`multipart` / `text/plain` 是 CORS 简单请求，第三方页面能零交互清空 `scene.json`、占满 GPU，`<img src>` 就能触发起终端的路由。前端写请求统一带 `x-imageworld-app`，六条路由校验；**更要紧的是后端**：视频重建流程里浏览器直连 `localhost:8000`，Next 层守卫对真正占 GPU 的那一端毫无作用，已补 FastAPI 的 Origin 中间件（无 `Origin` 的 curl / 服务端调用照常放行）。另：uvicorn 默认绑 `127.0.0.1`、`/docs` 默认关闭、上传按请求计额度、服务端门禁改读不带 `NEXT_PUBLIC_` 前缀的变量（前缀版本会在构建期被烤进服务端 bundle，运行时关不掉）。详见 PROJECT_REPORT §3.19。
+- [x] **删除零引用的 Marble key**：`.env.local` 里的 `WORLDLABS_API_KEY` 全仓库无任何代码读取（BYOK 走 localStorage + multipart），一个实时计费凭据只靠一行 gitignore 挡着。已删除，需去 platform.worldlabs.ai 吊销。
+- [x] **单位归后端**：`CELL_SIZE=0.15` / `CHARACTER_HEIGHT=1.6` / `density=250 kg/m³` 此前作用在未缩放几何上。**8 个世界里 5 个 scale≠1**（demo-office 1.131、family-splatfacto 3.659），在 3.659 上净空门限实际是 5.9 m、面积差 13.4 倍、质量差 49 倍。**第一版方案被真实数据否掉**：整体缩放点云会连带改变 `--voxel-size` / `--max-distance` 的含义，实测在 24 m 场景上砍掉一半几何、`floor` 只剩 1%。收窄为只换算「以米上报」的量——walkable 网格与道具质量，碰撞体本身保持世界单位。walkable JSON 带上 `metric_scale_factor`，Minimap 按 `builtScale/liveScale` 定位，旧文件按 1 回退。详见 PROJECT_REPORT §3.20。
+- [x] **坐标变换单一真源**：`WorldCollider` 与 `SplatRenderer` 改为 spread 同一个 `worldTransform()`；`propExtractor.test.ts` 此前是**第三份手写拷贝**，测的是它自己（把 SplatRenderer 的 offset 改成负号，9 个用例照样绿），现改为 import 真实模块并删掉恒真的往返用例。
+
+- [x] **walkable 真正接进管线**：`build_walkable_map` 此前**唯一调用点**在 CLI 的 `main()` 里，浏览器生成的世界一个都没有 minimap（roadmap 已标 `[x]`，文案也已写着在做）。不能塞进碰撞体那一趟——视频世界的 `metricScaleFactor` 是**从碰撞体地板高度反推**的，网格要的 scale 那时还不存在。新增 `/api/walkable`，吃已建好的碰撞体 GLB（小一百倍且分类已在文件里），两条 Next 路由各在知道 scale 的时刻调用。老世界的单节点碰撞体返回 422、调用方降级——它们要 minimap 需重跑一次 collider。详见 PROJECT_REPORT §3.21。
+- [x] **点选射线过滤**：`GroundPlane` 那块 200 m 隐形板与碰撞体共用 `DROP_TARGET_LAYER`，地板附近点击是掷硬币，且**任何朝下的落空点击都命中它**，让 §3.18 刚补的点空反馈几乎永不触发。改为按 `userData` 身份取"最近的房间命中"。
+- [ ] **道具从碰撞体里减掉**：抠出的 dynamic 凸包与房间的 fixed trimesh 精确重叠，物理上推不动、视觉上多一块灰壳。**不能用互斥 collisionGroups 止血**（房间碰撞体含 floor/elevated，互斥后道具只剩 y≈0 平板兜着，会穿墙穿台面）。正确解是后端回传选区索引 + `build_collider(exclude=)` + 抠完重跑碰撞体 + splat 端 opacity 置零；数天工作量且需要自己的进度反馈，按审计结论**回退到分支做**。
+
 - [ ] **SEO 优化与落地页**：制作令人惊艳的炫酷 3D 动效落地页，吸引早期流量。
 - [ ] **Beta 测试**：放开免费试用限额，收集用户反馈。
 - [ ] **商业化正式发布**。

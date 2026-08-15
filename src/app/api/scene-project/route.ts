@@ -6,6 +6,7 @@ import {
   sceneProjectPath,
   sanitizePlacementProject
 } from '../../../utils/worldsScanner'
+import { isAppRequest } from '../../../utils/sameOrigin'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,6 +31,12 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  // This overwrites the user's saved scene. Another tab could otherwise post
+  // an empty instance list here and wipe a room they spent an hour arranging.
+  if (!isAppRequest(request)) {
+    return new NextResponse('Forbidden', { status: 403 })
+  }
+
   const { searchParams } = new URL(request.url)
   const slug = searchParams.get('slug')
 

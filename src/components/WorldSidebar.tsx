@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Tooltip } from '@radix-ui/themes'
 import {
   ArrowCounterClockwise,
@@ -21,12 +22,14 @@ import {
   Square as SquareIcon,
   TerminalWindow as TerminalWindowIcon,
   Plus,
+  Trash as TrashIcon,
 } from '@phosphor-icons/react'
 import { useRouter } from 'next/navigation'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset, WorldSceneProject } from '../types/world'
 import { type ControllerMode, useDebugStore } from '../store/debug'
 import { useAudioStore } from '../store/audio'
-import { LOCAL_TOOLS_ENABLED } from '../utils/localTools'
+import { LOCAL_TOOLS_VISIBLE } from '../utils/localTools'
+import { APP_REQUEST_HEADERS } from '../utils/sameOrigin'
 import { REPO_URL } from '../utils/links'
 import { ViewerQuality } from '../types/world'
 import { AppButton } from './AppButton'
@@ -61,6 +64,8 @@ interface Props {
   onObjectHover?: (asset: WorldObjectAsset, hovering: boolean, instanceId?: string) => void
   onWorldHover?: (preview: WorldHoverPreview, hovering: boolean) => void
   onActiveWorldVersionChange: (index: number) => void
+  /** Re-read the library after it changes on disk. */
+  onWorldsChanged?: () => void | Promise<void>
 }
 
 
@@ -84,6 +89,7 @@ export function WorldSidebar({
   onObjectHover,
   onWorldHover,
   onActiveWorldVersionChange,
+  onWorldsChanged,
 }: Props) {
   const router = useRouter()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -92,9 +98,101 @@ export function WorldSidebar({
   const setButterfliesEnabled = useDebugStore((s) => s.setButterfliesEnabled)
   // These open a file manager or terminal on whichever machine runs the server,
   // so they follow the same gate as the routes behind them.
-  const canOpenLocalFolders = LOCAL_TOOLS_ENABLED
+  const canOpenLocalFolders = LOCAL_TOOLS_VISIBLE
 
   const [createModalOpen, setCreateModalOpen] = useState(false)
+
+  /**
+   * Right-clicking a world offers to delete it.
+   *
+   * Two steps rather than one, because this is not undoable and a world is
+   * hundreds of megabytes that may have cost real money to generate. The
+   * confirm names the world, so a mis-aimed right click has to be confirmed
+   * against something the user can read.
+   */
+  const [worldMenu, setWorldMenu] = useState<{ slug: string; x: number; y: number } | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [menuBusy, setMenuBusy] = useState(false)
+  const [menuError, setMenuError] = useState<string | null>(null)
+
+  const closeWorldMenu = () => {
+    setWorldMenu(null)
+    setConfirmingDelete(false)
+    setRenaming(false)
+    setMenuError(null)
+  }
+
+  useEffect(() => {
+    if (!worldMenu) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Same reason the backdrop ignores clicks mid-flight: closing here would
+      // hide a delete that is still running, and its error if it fails.
+      if (event.key === 'Escape' && !menuBusy) closeWorldMenu()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [worldMenu, menuBusy])
+
+  const deleteWorld = async (slug: string) => {
+    if (menuBusy) return
+    setMenuBusy(true)
+    setMenuError(null)
+    try {
+      const response = await fetch(`/api/worlds?slug=${encodeURIComponent(slug)}`, {
+        method: 'DELETE',
+        headers: APP_REQUEST_HEADERS,
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}))
+        throw new Error(body.error || `Could not delete this world (HTTP ${response.status}).`)
+      }
+      closeWorldMenu()
+      // Leaving the user standing in a world that no longer exists would load a
+      // broken page, so move to a neighbour first and only then re-read.
+      if (slug === activeSlug) {
+        const next = worlds.find((world) => world.slug !== slug)
+        router.push(next ? `/${next.slug}` : '/')
+      }
+      // Not `router.refresh()`: the library lives in `LoadedApp`'s state, seeded
+      // from props once, so refreshing the server payload leaves the list alone.
+      await onWorldsChanged?.()
+    } catch (error) {
+      setMenuError(error instanceof Error ? error.message : 'Could not delete this world.')
+    } finally {
+      setMenuBusy(false)
+    }
+  }
+
+  const renameWorld = async (slug: string, name: string) => {
+    const wanted = name.trim()
+    if (!wanted || menuBusy) return
+    setMenuBusy(true)
+    setMenuError(null)
+    try {
+      const response = await fetch(`/api/worlds?slug=${encodeURIComponent(slug)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...APP_REQUEST_HEADERS },
+        body: JSON.stringify({ name: wanted }),
+      })
+      const body = await response.json().catch(() => ({})) as { slug?: string; error?: string }
+      if (!response.ok) {
+        throw new Error(body.error || `Could not rename this world (HTTP ${response.status}).`)
+      }
+      closeWorldMenu()
+      // The slug is the URL, so renaming the world the user is standing in
+      // moves them; staying put would ask the router for a world that is gone.
+      if (slug === activeSlug && body.slug && body.slug !== slug) {
+        router.push(`/${body.slug}`)
+      }
+      await onWorldsChanged?.()
+    } catch (error) {
+      setMenuError(error instanceof Error ? error.message : 'Could not rename this world.')
+    } finally {
+      setMenuBusy(false)
+    }
+  }
 
   const shareWorld = async () => {
     const activeWorld = worlds.find((world) => world.slug === activeSlug)
@@ -119,19 +217,23 @@ export function WorldSidebar({
     }
   }
 
+  const menuWorldName = worldMenu
+    ? worlds.find((world) => world.slug === worldMenu.slug)?.project.display_name ?? worldMenu.slug
+    : ''
+
   const selectWorld = (slug: string) => {
     router.push(`/${slug}`)
     setMenuOpen(false)
   }
 
   const openClaudeTerminal = () => {
-    fetch('/api/open-claude-terminal').catch((error) => {
+    fetch('/api/open-claude-terminal', { headers: APP_REQUEST_HEADERS }).catch((error) => {
       console.warn('Could not open Claude terminal.', error)
     })
   }
 
   const openWorldFolder = (slug: string) => {
-    fetch(`/api/open-world-folder?slug=${encodeURIComponent(slug)}`).catch((error) => {
+    fetch(`/api/open-world-folder?slug=${encodeURIComponent(slug)}`, { headers: APP_REQUEST_HEADERS }).catch((error) => {
       console.warn(`Could not open world folder for "${slug}".`, error)
     })
   }
@@ -139,7 +241,7 @@ export function WorldSidebar({
   const openAssetFolder = (slug: string, target: 'scene' | 'world-asset' | 'object-asset', asset?: string) => {
     const params = new URLSearchParams({ slug, target })
     if (asset) params.set('asset', asset)
-    fetch(`/api/open-world-folder?${params.toString()}`).catch((error) => {
+    fetch(`/api/open-world-folder?${params.toString()}`, { headers: APP_REQUEST_HEADERS }).catch((error) => {
       console.warn(`Could not open ${target} folder for "${slug}".`, error)
     })
   }
@@ -262,6 +364,15 @@ export function WorldSidebar({
                     }}
                     onMouseLeave={() => {
                       if (!isActive) onWorldHover?.(sourcePreview, false)
+                    }}
+                    onContextMenu={(event) => {
+                      if (!canOpenLocalFolders) return
+                      event.preventDefault()
+                      setConfirmingDelete(false)
+                      setRenaming(false)
+                      setRenameValue(slug)
+                      setMenuError(null)
+                      setWorldMenu({ slug, x: event.clientX, y: event.clientY })
                     }}
                   >
                     <AppButton
@@ -467,6 +578,109 @@ export function WorldSidebar({
       </div>}
 
       <CreateWorldModal open={createModalOpen} onClose={() => setCreateModalOpen(false)} />
+      {worldMenu && createPortal((
+        <div
+          className="fixed inset-0 z-[60]"
+          onPointerDown={() => {
+            // Dismissing mid-flight would take the spinner and any error
+            // message with it, leaving a delete or rename running unseen.
+            if (!menuBusy) closeWorldMenu()
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            if (!menuBusy) closeWorldMenu()
+          }}
+        >
+          <div
+            role="menu"
+            aria-label={`Actions for ${menuWorldName}`}
+            className={`${chrome.panel} absolute w-60 p-1 text-sm`}
+            style={{
+              left: Math.min(worldMenu.x, (typeof window === 'undefined' ? 0 : window.innerWidth) - 252),
+              top: Math.min(worldMenu.y, (typeof window === 'undefined' ? 0 : window.innerHeight) - 210),
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="truncate px-2 py-1 font-mono text-xs text-white/50">{menuWorldName}</div>
+
+            {renaming ? (
+              <div className="flex flex-col gap-1 px-2 py-1">
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(event) => setRenameValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' || menuBusy) return
+                    event.preventDefault()
+                    void renameWorld(worldMenu.slug, renameValue)
+                  }}
+                  aria-label="New world name"
+                  className="w-full rounded border border-white/20 bg-black/40 px-2 py-1 text-sm text-white outline-none focus:border-white/50"
+                />
+                <p className="whitespace-normal text-[11px] leading-snug text-white/45">
+                  This is the folder name and the address, so the link to this world changes.
+                </p>
+                <div className="mt-1 flex gap-1">
+                  <AppButton
+                    onClick={() => void renameWorld(worldMenu.slug, renameValue)}
+                    disabled={menuBusy}
+                    className="flex-1 justify-center rounded bg-white/15 py-1.5 text-white hover:bg-white/25 disabled:opacity-60"
+                  >
+                    {menuBusy ? <LoadingSpinner /> : 'Rename'}
+                  </AppButton>
+                  <AppButton onClick={closeWorldMenu} disabled={menuBusy} className="flex-1 justify-center rounded py-1.5 text-white disabled:opacity-60">
+                    Cancel
+                  </AppButton>
+                </div>
+              </div>
+            ) : confirmingDelete ? (
+              <div className="flex flex-col gap-1 px-2 py-1">
+                <p className="whitespace-normal text-xs leading-snug text-white/75">
+                  Delete this world and everything in it? The files are removed from disk and
+                  cannot be recovered.
+                </p>
+                <div className="mt-1 flex gap-1">
+                  <AppButton
+                    onClick={() => void deleteWorld(worldMenu.slug)}
+                    disabled={menuBusy}
+                    className="flex-1 justify-center rounded bg-red-500/25 py-1.5 text-white hover:bg-red-500/40 disabled:opacity-60"
+                  >
+                    {menuBusy ? <LoadingSpinner /> : 'Delete'}
+                  </AppButton>
+                  <AppButton onClick={closeWorldMenu} disabled={menuBusy} className="flex-1 justify-center rounded py-1.5 text-white disabled:opacity-60">
+                    Cancel
+                  </AppButton>
+                </div>
+              </div>
+            ) : (
+              <>
+                <AppButton
+                  onClick={() => {
+                    setRenameValue(worldMenu.slug)
+                    setRenaming(true)
+                  }}
+                  className="w-full justify-start gap-2 rounded px-2 py-2 text-left text-white hover:bg-white/10"
+                >
+                  <PencilSimpleIcon size={15} weight="regular" />
+                  <span>Rename</span>
+                </AppButton>
+                <AppButton
+                  onClick={() => setConfirmingDelete(true)}
+                  className="w-full justify-start gap-2 rounded px-2 py-2 text-left text-white hover:bg-red-500/25"
+                >
+                  <TrashIcon size={15} weight="regular" />
+                  <span>Delete world</span>
+                </AppButton>
+              </>
+            )}
+
+            {menuError && (
+              <p className="whitespace-normal px-2 py-1 text-xs leading-snug text-red-300">{menuError}</p>
+            )}
+          </div>
+        </div>
+      ), document.body)}
+
     </aside>
   )
 }

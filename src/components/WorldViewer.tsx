@@ -10,11 +10,15 @@ import { useProgress } from '@react-three/drei'
 import { SplatRenderer } from '../modules/splat/SplatRenderer'
 import { EnvironmentMap } from '../modules/environment/EnvironmentMap'
 import { WorldCollider } from '../modules/collider/WorldCollider'
+import { WorldProps } from '../modules/collider/WorldProps'
 import { GroundPlane } from '../modules/collider/GroundPlane'
 import { CharacterController, type CharacterControllerHandle } from '../modules/character/CharacterController'
 import { FlyController, type FlyControllerHandle } from '../modules/character/FlyController'
 import { ObjectGrid } from '../modules/scene/ObjectGrid'
 import { PlacementEditorOverlay, PlacementEditorScene, usePlacementEditor } from '../modules/scene/PlacementEditor'
+import { PropExtractorOverlay, PropExtractorScene, usePropExtraction } from '../modules/scene/PropExtractor'
+import { ScreenshotButton, ScreenshotCapture, useScreenshot } from '../modules/capture/Screenshot'
+import { Minimap, MinimapTracker, useMinimapPose } from '../modules/minimap/Minimap'
 import { OriginHelper } from '../modules/scene/OriginHelper'
 import { AudioManager } from '../modules/audio/AudioManager'
 import { PostProcessing } from '../modules/postprocessing/PostProcessing'
@@ -185,6 +189,9 @@ export function WorldViewer({
   const panoUrl = desiredWorld?.assets.imagery.pano_url.startsWith('/worlds/')
     ? desiredWorld.assets.imagery.pano_url
     : ''
+  const worldProps = desiredWorld?.assets.props?.url.startsWith('/worlds/')
+    ? desiredWorld.assets.props
+    : undefined
 
   useEffect(() => {
     charRef.current?.reset()
@@ -234,6 +241,15 @@ export function WorldViewer({
     onObjectHover,
     onProjectSaved: onSceneProjectSaved,
   })
+  const propExtraction = usePropExtraction({
+    slug: desiredSlug,
+    onExtracted: onRefreshWorlds,
+  })
+  const screenshot = useScreenshot(desiredWorld?.display_name || desiredSlug)
+  const minimapPose = useMinimapPose()
+  const walkable = desiredWorld?.assets.walkable?.url.startsWith('/worlds/')
+    ? desiredWorld.assets.walkable
+    : undefined
   const activeSceneSun = editing ? placementEditor.sun : sceneProject?.sun
   const activeSunIntensity = activeSceneSun?.intensity ?? sunIntensity
   const activeEnvironmentIntensity = activeSceneSun?.environmentIntensity ?? environmentIntensity
@@ -322,6 +338,22 @@ export function WorldViewer({
                 </Suspense>
               </OptionalAssetBoundary>
             )}
+            {showScene && worldProps && (
+              <OptionalAssetBoundary label={worldProps.url} resetKey={worldProps.url}>
+                <Suspense fallback={null}>
+                  <WorldProps
+                    data={worldProps}
+                    flipY={flipY}
+                    rotationX={rotation_x}
+                    groundPlaneOffset={activeGroundPlaneOffset}
+                    metricScaleFactor={activeMetricScaleFactor}
+                    renderMode={objectRenderMode}
+                    shadowOpacity={activeShadowCatcherOpacity}
+                    shadowColor={activeShadowCatcherColor}
+                  />
+                </Suspense>
+              </OptionalAssetBoundary>
+            )}
             {showObjects && !editing && (
               <Suspense fallback={null}>
                 <ObjectGrid
@@ -378,9 +410,23 @@ export function WorldViewer({
           )}
           {!panoUrl && <DefaultEnvironment intensity={activeEnvironmentIntensity} />}
           <OriginHelper />
+          <PropExtractorScene controller={propExtraction} />
+          <ScreenshotCapture controller={screenshot} />
+          {walkable && <MinimapTracker poseRef={minimapPose} />}
           {isHighQuality && <PostProcessing />}
         </Suspense>
       </Canvas>
+      {/* Top right, not tucked into the source-image panel: that panel is
+          desktop-only, and a screenshot is exactly what a phone wants. */}
+      {uiVisible && (
+        <div className={`${chrome.enter} fixed right-2 top-2 z-30`}>
+          <ScreenshotButton controller={screenshot} className="pointer-events-auto" />
+        </div>
+      )}
+      {/* Left of the source-image panel, which sits in the same corner. */}
+      {uiVisible && !editing && walkable && (
+        <Minimap data={walkable} poseRef={minimapPose} metricScaleFactor={activeMetricScaleFactor} />
+      )}
       {uiVisible && (
         <SourceImageControls
           activeSourceImageUrl={activePreviewImageUrl}
@@ -391,6 +437,10 @@ export function WorldViewer({
           onThumbnailCollapseToggle={() => setSourceThumbnailCollapsed((collapsed) => !collapsed)}
         />
       )}
+      {/* Freeing an object needs the room's own gaussians, which only the
+          local pipeline has -- and only outside the placement editor, whose
+          clicks already mean something else. */}
+      {!editing && uiVisible && colliderUrl && <PropExtractorOverlay controller={propExtraction} />}
       {editing && uiVisible && <PlacementEditorOverlay controller={placementEditor} />}
     </>
   )

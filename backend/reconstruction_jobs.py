@@ -470,9 +470,19 @@ def get_job_or_404(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Reconstruction job not found") from error
 
 
+# Absolute host paths. `finalize` needs them from the single-job endpoint (it
+# validates each one against JOB_ROOT/<id> before touching it), but the list is
+# a browsable index, and there they are only a map of the operator's disk.
+LISTING_HIDDEN_FIELDS = ("source_path", "output_ply", "thumbnail_path")
+
+
 @router.get("")
 def list_reconstruction_jobs():
-    return {"jobs": manager.list()}
+    jobs = [
+        {key: value for key, value in state.items() if key not in LISTING_HIDDEN_FIELDS}
+        for state in manager.list()
+    ]
+    return {"jobs": jobs}
 
 
 @router.post("", status_code=202)

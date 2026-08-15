@@ -1,0 +1,13 @@
+{
+  "cell_size": 0.15,
+  "cols": 51,
+  "rows": 65,
+  "origin": [
+    -4.111554390374296,
+    -7.935390392324711
+  ],
+  "version": 1,
+  "metric_scale_factor": 1.131416,
+  "standable_area": 20.72,
+  "walkable_area": 19.35
+}

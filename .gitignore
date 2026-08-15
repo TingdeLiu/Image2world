@@ -82,3 +82,8 @@ __pycache__/
 # the source photo, but not full_res (28 MB).
 !/public/worlds/demo-office/
 !/public/worlds/demo-office/**
+
+# `build_collider.py` keeps the collider it is about to replace, so rebuilding a
+# generative world is reversible. For a tracked world that copy is redundant --
+# the previous version is already in the history.
+*.glb.orig
