@@ -34,6 +34,18 @@ CELL_SIZE = 0.15
 # From src/modules/character/spawn.ts. A cell you cannot stand upright in is
 # not walkable, whatever the floor under it looks like.
 CHARACTER_HEIGHT = 1.6
+# How far above a cell's floor something has to be before it counts as overhead
+# rather than as part of the floor itself.
+#
+# This was 0.1 m, which is smaller than a voxel on a world whose metric scale is
+# above 2 -- `--voxel-size` is in world units, so marble-office's 0.05 is 10.5 cm
+# on the ground. The floor's own marching-cubes stepping then read as a ceiling
+# 10 cm up and failed the headroom test: 94% of that world's cells were culled
+# and its map claimed 3.9 m2 of a 93.5 m2 room. Measured across four worlds,
+# 0.20 recovers nearly all of it (marble-office 3.9 -> 76.3 m2, room1
+# 18.0 -> 24.5) and 0.30 adds only a few percent more, which is the point where
+# a real low obstacle would start being ignored.
+FLOOR_SKIRT = 0.20
 # Reconstruction noise leaves single-cell islands and pinholes; a real doorway
 # is several cells wide and survives this.
 DESPECKLE_ITERATIONS = 1
@@ -46,6 +58,7 @@ def walkable_grid(
     flip_y: bool = True,
     cell_size: float = CELL_SIZE,
     headroom: float = CHARACTER_HEIGHT,
+    floor_skirt: float = FLOOR_SKIRT,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Grid the standable surface, returning (walkable, floor_height, meta).
 
@@ -96,11 +109,12 @@ def walkable_grid(
     floor_height[np.isinf(floor_height)] = np.nan
 
     # Headroom: the lowest thing overhead that is not the floor itself. The
-    # 0.1 m skirt keeps a surface from reading as its own ceiling.
+    # skirt keeps a surface from reading as its own ceiling -- see FLOOR_SKIRT
+    # for why it has to clear a voxel of the collider, not just a centimetre.
     ceiling = np.full((rows, cols), np.inf)
     row, col = cell_of(all_points)
     base = floor_height[row, col]
-    overhead = np.isfinite(base) & (all_points[:, 1] > base + 0.1)
+    overhead = np.isfinite(base) & (all_points[:, 1] > base + floor_skirt)
     np.minimum.at(ceiling, (row[overhead], col[overhead]), all_points[overhead, 1])
 
     standable = ~np.isnan(floor_height)
@@ -251,3 +265,93 @@ def build_walkable_map(
         "walkable_area": round(float(reachable.sum()) * cell_area, 2),
     })
     return walkable_png(reachable), meta
+
+
+def main() -> None:
+    """Refresh one world's walkable map from its collider GLB.
+
+    The collider already carries the surface split, so this needs neither the
+    point cloud nor another voxelisation. That is what makes a change to
+    `FLOOR_SKIRT` or `CELL_SIZE` cheap to roll out: every existing world's map
+    can be rebuilt without touching the collision mesh it was derived from.
+
+    Usage:
+        python backend/tools/build_walkable.py <world-slug> [--dry-run]
+    """
+    import argparse
+    import json
+    import sys
+    from pathlib import Path
+
+    # Imported here, not at module scope: the collider pulls in scikit-image,
+    # and the note at the top of this file is that the map stays importable
+    # without it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from build_collider import (
+        WORLDS_DIR,
+        oriented_for_classification,
+        read_metric_scale,
+        read_orientation,
+    )
+
+    parser = argparse.ArgumentParser(description="Rebuild a world's walkable map from its collider GLB")
+    parser.add_argument("slug", help="World slug under public/worlds/")
+    parser.add_argument("--dry-run", action="store_true", help="Report without writing")
+    args = parser.parse_args()
+
+    world_dir = WORLDS_DIR / args.slug / "output" / "world"
+    glbs = sorted(world_dir.glob("*-world.glb"))
+    if not glbs:
+        print(f"error: no <n>-world.glb in {world_dir}", file=sys.stderr)
+        raise SystemExit(1)
+    glb_path = glbs[-1]
+    index = glb_path.name.split("-", 1)[0]
+
+    mesh, groups = collider_groups(trimesh.load(glb_path))
+    if not groups:
+        print(
+            f"error: {glb_path.name} has no per-class nodes, so there is no way to tell "
+            "which faces were floor. Rebuild it with build_collider.py first.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    metric_scale = read_metric_scale(world_dir, args.slug, index)
+    flip_y, rotation_x = read_orientation(world_dir, index)
+    oriented, oriented_flip_y = oriented_for_classification(mesh, flip_y, rotation_x)
+
+    spawn = None
+    scene_path = WORLDS_DIR / args.slug / "scene.json"
+    if scene_path.is_file():
+        spawn_point = json.loads(scene_path.read_text(encoding="utf-8")).get("spawnPoint")
+        if isinstance(spawn_point, list) and len(spawn_point) == 2:
+            spawn = (float(spawn_point[0]), float(spawn_point[1]))
+
+    metric_mesh = oriented
+    if metric_scale != 1.0:
+        metric_mesh = oriented.copy()
+        metric_mesh.apply_scale(metric_scale)
+
+    png, meta = build_walkable_map(
+        metric_mesh, groups, flip_y=oriented_flip_y, spawn_xz=spawn,
+        metric_scale_factor=metric_scale,
+    )
+    stranded = meta["standable_area"] - meta["walkable_area"]
+    print(
+        f"{args.slug}: {meta['walkable_area']:.1f} m2 reachable of "
+        f"{meta['standable_area']:.1f} m2 standable ({stranded:.1f} m2 stranded) "
+        f"at {metric_scale:.4g} units/m"
+    )
+    if args.dry_run:
+        print("dry run; nothing written")
+        return
+
+    (world_dir / f"{index}-world-walkable.png").write_bytes(png)
+    (world_dir / f"{index}-world-walkable.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
+    print(f"wrote {index}-world-walkable.png / .json")
+
+
+if __name__ == "__main__":
+    main()

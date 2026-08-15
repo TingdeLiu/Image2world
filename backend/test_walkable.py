@@ -10,6 +10,7 @@ import pytest
 import trimesh
 
 from backend.tools.build_walkable import (
+    FLOOR_SKIRT,
     build_walkable_map,
     reachable_from,
     walkable_grid,
@@ -44,6 +45,29 @@ def test_grid_covers_the_floor(room: trimesh.Trimesh):
     # A bare slab has nothing overhead, so all of it should be standable.
     assert np.isfinite(floor_height[walkable]).all()
     assert np.allclose(floor_height[walkable], 0.025, atol=0.05)
+
+
+def test_a_stepped_floor_is_not_its_own_ceiling():
+    """The regression the skirt exists for.
+
+    A voxelised floor is not flat: neighbouring voxels differ by up to one
+    voxel edge, and on a world whose metric scale is above 2 that edge is over
+    10 cm. With the old 0.1 m skirt those steps registered as overhead and
+    marble-office reported 3.9 m2 of a 93.5 m2 room.
+    """
+    lower = slab(4.0, 4.0, 0.0)
+    step = slab(4.0, 2.0, 0.105, offset_z=1.0)   # half the floor, one voxel up
+    room = trimesh.util.concatenate([lower, step])
+
+    walkable, _, _ = walkable_grid(room, standable_faces(room), flip_y=False)
+    # Nothing is actually overhead here, so essentially all of it must survive.
+    assert walkable.mean() > 0.9, "a step in the floor was mistaken for a ceiling"
+
+
+def test_skirt_clears_a_voxel_of_the_coarsest_collider():
+    # `--voxel-size 0.05` is in world units; at marble-office's 2.1 scale that
+    # is 10.5 cm on the ground, and the skirt has to sit above it.
+    assert FLOOR_SKIRT > 0.05 * 2.1
 
 
 def test_a_low_ceiling_makes_a_floor_unwalkable():
