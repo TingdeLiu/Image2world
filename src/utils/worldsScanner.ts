@@ -711,14 +711,43 @@ export function sanitizePlacementProject(input: unknown): WorldSceneProject | un
   }
 }
 
-export function readSceneProject(slug: string): WorldSceneProject | undefined {
+/**
+ * A world's scene.json, keeping "there isn't one" apart from "it will not read".
+ *
+ * These used to be the same answer, and the editor treats "there isn't one" as
+ * permission to write a default project over it. So a single bad byte in a file
+ * somebody spent an hour arranging -- a half-finished write, a hand edit with a
+ * stray comma -- became a silent reset the next time they opened the editor.
+ * Nothing in the UI said anything; the save indicator said "Saved".
+ */
+export type SceneProjectRead =
+  | { status: 'absent' }
+  | { status: 'invalid'; detail: string }
+  | { status: 'ok'; project: WorldSceneProject }
+
+export function readSceneProjectResult(slug: string): SceneProjectRead {
   const filePath = sceneProjectPath(slug)
-  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return undefined
-  try {
-    return sanitizePlacementProject(JSON.parse(fs.readFileSync(filePath, 'utf-8')))
-  } catch {
-    return undefined
+  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return { status: 'absent' }
   }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+  } catch (error) {
+    return { status: 'invalid', detail: error instanceof Error ? error.message : 'unreadable' }
+  }
+  const project = sanitizePlacementProject(parsed)
+  if (!project) {
+    // Parsed but nothing usable came out: a different version, or a shape this
+    // build does not recognise. Still not an invitation to overwrite it.
+    return { status: 'invalid', detail: 'not a scene project this version understands' }
+  }
+  return { status: 'ok', project }
+}
+
+export function readSceneProject(slug: string): WorldSceneProject | undefined {
+  const result = readSceneProjectResult(slug)
+  return result.status === 'ok' ? result.project : undefined
 }
 
 export function readWorlds(): WorldEntry[] {
