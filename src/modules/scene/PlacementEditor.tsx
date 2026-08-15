@@ -51,6 +51,7 @@ interface EditorStateArgs {
   baseMetricScaleFactor: number
   baseGroundPlaneOffset: number
   sceneProjectReady: boolean
+  sceneProjectBroken?: boolean
   editing: boolean
   hoveredObjectAssetId?: string | null
   hoveredObjectInstanceId?: string | null
@@ -663,6 +664,7 @@ export function usePlacementEditor({
   baseMetricScaleFactor,
   baseGroundPlaneOffset,
   sceneProjectReady,
+  sceneProjectBroken = false,
   editing,
   hoveredObjectAssetId,
   hoveredObjectInstanceId,
@@ -1113,7 +1115,10 @@ export function usePlacementEditor({
   }, [baseGroundPlaneOffset, baseMetricScaleFactor, onProjectSaved, slug])
 
   useEffect(() => {
-    if (!editing || !sceneProjectReady || sceneProject || !objects.length) return
+    // `sceneProjectBroken` is the difference between "no scene yet" and "a
+    // scene that would not load". Writing defaults over the second is how an
+    // hour of arranging disappears with the UI reporting "Saved".
+    if (!editing || !sceneProjectReady || sceneProjectBroken || sceneProject || !objects.length) return
     const project: WorldSceneProject = {
       version: projectVersion,
       instances: clonePlacements(baseline.instances),
@@ -1137,7 +1142,7 @@ export function usePlacementEditor({
       .catch((error) => {
         console.warn('Failed to initialize scene project.', error)
       })
-  }, [baseline, editing, objects.length, onProjectSaved, sceneProject, sceneProjectReady, slug])
+  }, [baseline, editing, objects.length, onProjectSaved, sceneProject, sceneProjectBroken, sceneProjectReady, slug])
 
   useEffect(() => {
     if (!editing || !dirty) return

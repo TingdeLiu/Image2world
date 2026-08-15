@@ -120,6 +120,8 @@ export interface WorldViewerProps {
   worldSfxUrls: string[]
   sceneProject?: WorldSceneProject
   sceneProjectReady?: boolean
+  /** The world has a scene.json that will not parse; do not write over it. */
+  sceneProjectBroken?: boolean
   hoveredObjectAssetId?: string | null
   hoveredObjectInstanceId?: string | null
   editing?: boolean
@@ -153,6 +155,7 @@ export function WorldViewer({
   worldSfxUrls,
   sceneProject,
   sceneProjectReady = true,
+  sceneProjectBroken = false,
   hoveredObjectAssetId,
   hoveredObjectInstanceId,
   editing = false,
@@ -235,6 +238,7 @@ export function WorldViewer({
     baseMetricScaleFactor,
     baseGroundPlaneOffset,
     sceneProjectReady,
+    sceneProjectBroken,
     editing,
     hoveredObjectAssetId,
     hoveredObjectInstanceId,

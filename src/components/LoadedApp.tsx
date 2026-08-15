@@ -268,7 +268,7 @@ export function LoadedApp({
   const viewerLoadKey = `${entry?.slug ?? slug}:${activeWorldVersionIndex ?? 'default'}:${viewerQuality}:${viewerRetryToken}`
   
   // Use pathname as refreshKey to trigger re-fetch on route transitions
-  const { sceneProject, sceneProjectReady, updateSceneProject } = useSceneProject(
+  const { sceneProject, sceneProjectReady, sceneProjectBroken, updateSceneProject } = useSceneProject(
     entry?.slug ?? slug,
     pathname || '',
     entry?.sceneProject
@@ -315,11 +315,20 @@ export function LoadedApp({
 
   const handleSceneProgress = useCallback((progress: number) => {
     const percent = Math.round(18 + progress * 78)
-    setViewerLoadState((current) => (
-      current.phase === 'error' || current.phase === 'ready'
-        ? current
-        : { phase: 'scene', progress: Math.max(current.progress, percent) }
-    ))
+    setViewerLoadState((current) => {
+      if (current.phase === 'error' || current.phase === 'ready') return current
+      const next = Math.max(current.progress, percent)
+      // Returning the same object when the number has not moved is the whole
+      // point. This fires once per fetch chunk -- Spark's loader reports every
+      // 64 KB, so a 45-200 MB cloud calls it hundreds to thousands of times --
+      // while the bar itself only has 79 positions. Every no-op update used to
+      // re-render the tree under it: the editor's baseline recomputed with two
+      // JSON.stringify passes, ObjectGrid's memos dropped, PropExtractor's
+      // pointer listener detached and reattached. All of it during the seconds
+      // the user is watching the bar and nothing else.
+      if (current.phase === 'scene' && current.progress === next) return current
+      return { phase: 'scene', progress: next }
+    })
   }, [])
 
   const handleSceneReady = useCallback(() => {
@@ -399,6 +408,7 @@ export function LoadedApp({
           worldSfxUrls={entry.worldSfxUrls}
           sceneProject={editing || sceneProjectEnabled ? sceneProject : undefined}
           sceneProjectReady={sceneProjectReady}
+          sceneProjectBroken={sceneProjectBroken}
           hoveredObjectAssetId={hoveredObjectAssetId}
           hoveredObjectInstanceId={hoveredObjectInstanceId}
           editing={editing}
