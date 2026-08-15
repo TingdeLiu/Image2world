@@ -38,7 +38,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -115,6 +117,98 @@ def read_splat_ply(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
     xyz = np.stack([raw["x"], raw["y"], raw["z"]], axis=1).astype(np.float32)
     opacity = raw["opacity"].astype(np.float32) if "opacity" in raw.dtype.names else None
     return xyz, opacity
+
+
+SPZ_MAGIC = 0x5053474E  # "NGSP", little-endian
+# Coefficients per colour channel at each spherical-harmonic degree. Only the
+# stride depends on this; the coefficients themselves are never read.
+SPZ_SH_DIM = {0: 0, 1: 3, 2: 8, 3: 15}
+
+
+def read_splat_spz(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
+    """Read positions and (logit) opacity from a Niantic SPZ splat.
+
+    Marble hands back SPZ where SHARP writes PLY, so without this a generative
+    world could not be given a local collider at all -- there was no `.ply` for
+    `main()` to find, and the Marble worlds in this repo silently had no
+    walkable map and no surface classification.
+
+    The container is a gzip stream around a 16-byte header followed by *planar*
+    arrays: every position, then every alpha, then colours, scales and
+    rotations. Only the first two planes are read here, which is also why the
+    spherical-harmonic tail never has to be decoded -- it only shifts the stride
+    used to check the file is the length it claims.
+
+    Positions are 24-bit little-endian signed fixed point, with the header's
+    `fractional_bits` (12 in every file this repo has) saying where the point
+    sits. That is a resolution of 1/4096, or 0.24 mm -- two orders of magnitude
+    finer than the 5 cm voxel grid downstream, so the lossy container costs the
+    collider nothing.
+
+    Alpha is stored linearly in 0-255 while a PLY carries the logit, so it is
+    converted back rather than changing a signature `server.py` also calls.
+    """
+    raw = path.read_bytes()
+    if raw[:2] != b"\x1f\x8b":
+        raise ValueError(f"{path.name}: not a gzip stream; SPZ is always compressed")
+    data = gzip.decompress(raw)
+    if len(data) < 16:
+        raise ValueError(f"{path.name}: header truncated")
+
+    magic, version, count, sh_degree, fractional_bits, _flags, _reserved = struct.unpack(
+        "<IIIBBBB", data[:16]
+    )
+    if magic != SPZ_MAGIC:
+        raise ValueError(f"{path.name}: bad magic 0x{magic:08x}, expected 0x{SPZ_MAGIC:08x}")
+    if version != 2:
+        raise ValueError(f"{path.name}: unsupported SPZ version {version}")
+    if sh_degree not in SPZ_SH_DIM:
+        raise ValueError(f"{path.name}: unsupported SH degree {sh_degree}")
+    if count <= 0:
+        raise ValueError(f"{path.name}: no gaussians")
+
+    body = data[16:]
+    # 9 position + 1 alpha + 3 colour + 3 scale + 3 rotation, plus any SH.
+    stride = 19 + SPZ_SH_DIM[sh_degree] * 3
+    if len(body) != count * stride:
+        raise ValueError(
+            f"{path.name}: expected {count * stride:,} payload bytes for {count:,} "
+            f"gaussians at SH degree {sh_degree}, found {len(body):,}"
+        )
+
+    packed = np.frombuffer(body, dtype=np.uint8, count=count * 9).reshape(count, 3, 3).astype(np.int32)
+    fixed = packed[..., 0] | (packed[..., 1] << 8) | (packed[..., 2] << 16)
+    fixed = np.where(fixed & 0x800000, fixed - 0x1000000, fixed)  # sign-extend 24-bit
+    xyz = (fixed / float(1 << fractional_bits)).astype(np.float32)
+
+    alpha = np.frombuffer(body, dtype=np.uint8, count=count, offset=count * 9) / 255.0
+    # Both ends of this range are well populated -- a sixth of a typical file is
+    # exactly 255 -- and the logit is infinite there, so pull it in first.
+    alpha = np.clip(alpha, 1e-5, 1.0 - 1e-5)
+    opacity = np.log(alpha / (1.0 - alpha)).astype(np.float32)
+    return xyz, opacity
+
+
+# Which file to build from, best first. SHARP worlds carry PLY and Marble worlds
+# carry SPZ; no world has both. Marble omits `full_res` from the smaller bundles,
+# so the LOD ladder is walked down rather than demanded.
+SPLAT_CANDIDATES = ("full_res.ply", "full_res.spz", "500k.spz", "150k.spz", "100k.spz")
+
+
+def find_splat_file(world_dir: Path) -> Path | None:
+    """The best splat container in a world directory, or None if there is none."""
+    for suffix in SPLAT_CANDIDATES:
+        found = sorted(world_dir.glob(f"*-world-{suffix}"))
+        if found:
+            return found[-1]
+    return None
+
+
+def read_splat_cloud(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
+    """Positions and logit opacity, from either container this repo produces."""
+    if path.suffix.lower() == ".spz":
+        return read_splat_spz(path)
+    return read_splat_ply(path)
 
 
 def build_collider(
@@ -397,15 +491,17 @@ def main() -> None:
         print(f"error: no world at {world_dir}", file=sys.stderr)
         raise SystemExit(1)
 
-    plys = sorted(world_dir.glob("*-world-full_res.ply"))
-    if not plys:
-        print(f"error: no <n>-world-full_res.ply in {world_dir}", file=sys.stderr)
+    splat_path = find_splat_file(world_dir)
+    if splat_path is None:
+        print(
+            f"error: no <n>-world-full_res.ply and no <n>-world-*.spz in {world_dir}",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
-    ply_path = plys[-1]
-    index = ply_path.name.split("-", 1)[0]
+    index = splat_path.name.split("-", 1)[0]
 
-    print(f"reading {ply_path.name}")
-    xyz, opacity = read_splat_ply(ply_path)
+    print(f"reading {splat_path.name}")
+    xyz, opacity = read_splat_cloud(splat_path)
     print(f"  {len(xyz):,} splats")
 
     # Read but deliberately not applied to the cloud. Scaling here would also
@@ -440,10 +536,22 @@ def main() -> None:
 
     floor_y = detect_floor_height(oriented, flip_y=oriented_flip_y)
     ground_offset = None if floor_y is None else -floor_y
+    # The viewer adds `groundPlaneOffset` *after* scaling the world (see
+    # `worldTransform.ts`), so what it wants is a distance in metres -- but
+    # `floor_y` was measured on a mesh left in world units. Writing the raw
+    # number only ever looked correct because every world this was tested on had
+    # a scale of 1. On the 3.66x splatfacto world here it put the floor 7 m below
+    # the ground plane, and it would have quietly corrupted the offset Marble
+    # ships with its own worlds the first time one was rebuilt.
+    ground_offset_metres = None if ground_offset is None else ground_offset * metric_scale
     if ground_offset is None:
         print("  warning: no dominant floor surface found; leaving ground_plane_offset unchanged")
     else:
-        print(f"  floor at y={-ground_offset:+.2f} (viewer space) -> ground_plane_offset = {ground_offset:+.3f}")
+        units = "" if metric_scale == 1.0 else f" ({ground_offset:+.3f} world units x {metric_scale:.4g})"
+        print(
+            f"  floor at y={-ground_offset:+.2f} (viewer space) -> "
+            f"ground_plane_offset = {ground_offset_metres:+.3f} m{units}"
+        )
 
     groups = classify_surfaces(oriented, floor_y=floor_y, flip_y=oriented_flip_y)
     # By area, not face count: decimation leaves flat regions as a few large
@@ -461,6 +569,13 @@ def main() -> None:
         return
 
     glb_path = world_dir / f"{index}-world.glb"
+    # A Marble world arrives with a collider mesh of its own at exactly this
+    # path, and it is the only copy -- Marble's download URLs expire. Keep it the
+    # first time this runs, so rebuilding a generative world is reversible.
+    original = glb_path.with_name(glb_path.name + ".orig")
+    if glb_path.is_file() and not original.is_file():
+        original.write_bytes(glb_path.read_bytes())
+        print(f"  kept the previous collider as {original.name}")
     labeled_collider_scene(mesh, groups).export(glb_path)
     print(f"wrote {glb_path.relative_to(REPO_ROOT)} ({glb_path.stat().st_size / 1024 / 1024:.1f} MB)")
 
@@ -515,7 +630,7 @@ def main() -> None:
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         semantics = manifest.setdefault("assets", {}).setdefault("splats", {}).setdefault("semantics_metadata", {})
-        semantics["ground_plane_offset"] = round(ground_offset, 4)
+        semantics["ground_plane_offset"] = round(ground_offset_metres, 4)
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         print(f"updated {manifest_path.relative_to(REPO_ROOT)} (ground_plane_offset)")
 
@@ -531,7 +646,7 @@ def main() -> None:
     if current not in (0, 0.0, None):
         print(f"note: scene.json keeps its edited groundPlaneOffset ({current}); not overwriting")
         return
-    scene["groundPlaneOffset"] = round(ground_offset, 4)
+    scene["groundPlaneOffset"] = round(ground_offset_metres, 4)
     scene_path.write_text(json.dumps(scene, indent=2), encoding="utf-8")
     print(f"updated {scene_path.relative_to(REPO_ROOT)} (groundPlaneOffset)")
 
