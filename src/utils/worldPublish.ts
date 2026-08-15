@@ -55,13 +55,31 @@ export async function moveDirectory(from: string, to: string): Promise<MoveOutco
     }
   }
 
-  fs.cpSync(from, to, { recursive: true })
+  try {
+    fs.cpSync(from, to, { recursive: true })
+  } catch (error) {
+    // A copy that stopped halfway leaves a partial world at the destination,
+    // which the scanner would list as real and which permanently claims that
+    // name. Take it back out before reporting the failure.
+    fs.rmSync(to, { recursive: true, force: true })
+    throw error
+  }
+
   try {
     fs.rmSync(from, { recursive: true, force: true })
   } catch (error) {
-    // The copy is what callers depend on. A source that will not delete is a
-    // duplicate left on disk, which is untidy rather than wrong.
+    // The copy succeeded, so `to` is the good one and must be left alone --
+    // whatever is holding `from` open would likely hold `to` too, and losing
+    // both is the one outcome worse than a duplicate. Take the source out of
+    // the scanner's view instead: `readWorlds` skips any directory without a
+    // project.json, and unlinking one file is far more likely to succeed than
+    // removing a tree.
     console.warn(`[Worlds] Copied ${from} to ${to} but could not remove the original:`, error)
+    try {
+      fs.rmSync(`${from}/project.json`, { force: true })
+    } catch {
+      // Then it stays visible as a duplicate, which the caller reports.
+    }
   }
   return 'copied'
 }

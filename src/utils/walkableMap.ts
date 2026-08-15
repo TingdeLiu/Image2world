@@ -60,10 +60,20 @@ export async function buildWalkableMap(
       formData.append('spawn_z', String(options.spawn[1]))
     }
 
+    // Both, not either. Passing a caller's signal used to replace the timeout
+    // rather than join it, so the interactive path -- the one that does pass a
+    // signal -- had no timeout at all, and a wedged backend left the generation
+    // stream sitting at 86% forever. `backendRequest` in the generate route
+    // already combines them; this is the same shape.
+    const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 180_000)
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal
+
     const response = await fetch(`${backendUrl}/api/walkable`, {
       method: 'POST',
       body: formData,
-      signal: options.signal ?? AbortSignal.timeout(options.timeoutMs ?? 180_000),
+      signal,
     })
     if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`)
 

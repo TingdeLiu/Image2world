@@ -12,12 +12,17 @@ test asks for a 5.9 m ceiling and a chair comes back 49x too heavy.
 """
 
 import json
+import math
 
 import numpy as np
 import pytest
 import trimesh
 
-from backend.tools.build_collider import read_metric_scale
+from backend.tools.build_collider import (
+    oriented_for_classification,
+    read_metric_scale,
+    read_orientation,
+)
 from backend.tools.build_props import prop_descriptor
 from backend.tools.build_walkable import build_walkable_map
 
@@ -145,3 +150,85 @@ def test_headroom_is_measured_in_metres(tmp_path):
     tall = trimesh.util.concatenate([floor, floor_slab(size=6.0, height=3.0)])
     _, meta_tall = build_walkable_map(tall, groups, flip_y=False)
     assert meta_tall["standable_area"] > 10
+
+
+# --- Which way up ------------------------------------------------------------
+
+
+def write_orientation(world_dir, **fields):
+    (world_dir / "0-world.json").write_text(
+        json.dumps({"assets": {"splats": {"semantics_metadata": fields}}}),
+        encoding="utf-8",
+    )
+
+
+def test_orientation_defaults_to_sharp(world):
+    # Every world without the fields is a SHARP world, which is upside down.
+    world_dir, _ = world
+    assert read_orientation(world_dir, "0") == (True, None)
+
+
+def test_orientation_reads_a_nerfstudio_world(world):
+    """The case that was being classified along the wrong axis.
+
+    A Nerfstudio reconstruction is already Y-up and says so with
+    `flip_y: false` plus an explicit rotation. Read only `metric_scale_factor`
+    out of this dict -- which is what this file used to do -- and the floor
+    detector finds a wall instead, then writes that height into the manifest
+    and scene.json.
+    """
+    world_dir, _ = world
+    write_orientation(world_dir, flip_y=False, rotation_x=-math.pi / 2, metric_scale_factor=3.659)
+    assert read_orientation(world_dir, "0") == (False, pytest.approx(-math.pi / 2))
+
+
+@pytest.mark.parametrize("bad", ["true", "false", 1, 0, None, [], {}])
+def test_flip_y_must_be_an_actual_boolean(world, bad):
+    # The string "false" is truthy, so taking it at face value would flip a
+    # world that said not to. Anything but a real bool falls back to SHARP.
+    world_dir, _ = world
+    write_orientation(world_dir, flip_y=bad)
+    assert read_orientation(world_dir, "0")[0] is True
+
+
+@pytest.mark.parametrize("bad", ["1.57", None, [], {}, True, False])
+def test_rotation_x_must_be_an_actual_number(world, bad):
+    # `True` is an int in Python and would otherwise become one radian.
+    world_dir, _ = world
+    write_orientation(world_dir, rotation_x=bad)
+    assert read_orientation(world_dir, "0")[1] is None
+
+
+@pytest.mark.parametrize("angle", [1, -1.5707963267948966, 0])
+def test_rotation_x_accepts_any_real_angle(world, angle):
+    world_dir, _ = world
+    write_orientation(world_dir, rotation_x=angle)
+    assert read_orientation(world_dir, "0")[1] == pytest.approx(float(angle))
+
+
+def test_orientation_survives_a_missing_or_corrupt_manifest(world):
+    world_dir, _ = world
+    assert read_orientation(world_dir, "0") == (True, None)
+    (world_dir / "0-world.json").write_text("{not json", encoding="utf-8")
+    assert read_orientation(world_dir, "0") == (True, None)
+
+
+def test_rotation_replaces_the_flip_rather_than_stacking_with_it():
+    """A rotated mesh is already in viewer space, so it must not flip again.
+
+    Doing both would put the world back upside down, which reads as "the floor
+    detector is broken" rather than as a double transform.
+    """
+    mesh = trimesh.creation.box(extents=(2.0, 1.0, 3.0))
+    oriented, flip = oriented_for_classification(mesh, flip_y=True, rotation_x=-math.pi / 2)
+    assert flip is False
+    # Y and Z swap under a quarter turn about X.
+    size = oriented.bounds[1] - oriented.bounds[0]
+    assert size == pytest.approx([2.0, 3.0, 1.0], abs=1e-9)
+
+
+def test_no_rotation_leaves_the_mesh_and_the_flip_alone():
+    mesh = trimesh.creation.box(extents=(2.0, 1.0, 3.0))
+    oriented, flip = oriented_for_classification(mesh, flip_y=True, rotation_x=None)
+    assert flip is True
+    assert oriented is mesh, "an unrotated mesh should not be copied"

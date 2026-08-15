@@ -7,6 +7,17 @@ import { isAppRequest } from '../../../utils/sameOrigin'
 import { moveDirectory, slugify } from '../../../utils/worldPublish'
 
 export const dynamic = 'force-dynamic'
+
+/**
+ * Slugs with a rename or delete in flight.
+ *
+ * Disabling the buttons stops the same tab double-firing; it does nothing about
+ * a second tab, and both operations here take long enough to invite one. Two
+ * concurrent renames would have their `cpSync` calls writing the same target
+ * files, which on Windows ends as EBUSY or as a truncated .ply -- so the second
+ * caller is turned away rather than allowed to interleave.
+ */
+const inFlight = new Set<string>()
 // Removing a world means removing hundreds of megabytes, which is not instant.
 export const maxDuration = 120
 
@@ -68,7 +79,12 @@ export async function PATCH(request: NextRequest) {
   if (fs.existsSync(nextDir)) {
     return NextResponse.json({ error: `“${nextSlug}” already exists.` }, { status: 409 })
   }
+  if (inFlight.has(slug) || inFlight.has(nextSlug)) {
+    return NextResponse.json({ error: 'This world is already being changed.' }, { status: 409 })
+  }
 
+  inFlight.add(slug)
+  inFlight.add(nextSlug)
   try {
     const how = await moveDirectory(worldDir, nextDir)
     if (how === 'copied') {
@@ -77,6 +93,9 @@ export async function PATCH(request: NextRequest) {
   } catch (error) {
     console.error(`[Worlds] Could not rename "${slug}":`, error)
     return NextResponse.json({ error: 'Could not rename this world.' }, { status: 500 })
+  } finally {
+    inFlight.delete(slug)
+    inFlight.delete(nextSlug)
   }
 
   const patchJson = (file: string, apply: (record: Record<string, unknown>) => void) => {
@@ -144,6 +163,11 @@ export async function DELETE(request: NextRequest) {
   // available -- the watcher on `public/` holds the directory open -- so this
   // tries it and removes in place when it cannot, rather than paying to copy
   // hundreds of megabytes on the way to deleting them.
+  if (inFlight.has(slug)) {
+    return NextResponse.json({ error: 'This world is already being changed.' }, { status: 409 })
+  }
+  inFlight.add(slug)
+
   const staged = path.join(process.cwd(), '.artifacts', 'deleted-worlds', `${slug}-${Date.now()}`)
   let target = worldDir
   try {
@@ -159,6 +183,8 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     console.error(`[Worlds] Could not delete "${slug}":`, error)
     return NextResponse.json({ error: 'Could not delete this world.' }, { status: 500 })
+  } finally {
+    inFlight.delete(slug)
   }
 
   console.log(`[Worlds] Deleted "${slug}".`)

@@ -323,6 +323,66 @@ def read_metric_scale(world_dir: Path, slug: str, index: str) -> float:
     return 1.0
 
 
+def read_orientation(world_dir: Path, index: str) -> tuple[bool, float | None]:
+    """Which way up this world's point cloud is, from the same manifest.
+
+    `flip_y` and `rotation_x` sit in the dict `read_metric_scale` already opens,
+    and reading one without the others is how this file came to assume every
+    world was a SHARP world. They are not: a Nerfstudio reconstruction records
+    `flip_y: false` with `rotation_x: -pi/2`, and classifying it as if it were
+    upside-down finds a wall where the floor should be.
+
+    That mistake is quiet and it spreads. The floor height derived from it is
+    written back into the manifest and into scene.json, so a single run leaves
+    the world misaligned in files nobody thinks to check. On the splatfacto
+    world here it turns a correct 0.617 into 2.547.
+
+    Defaults are SHARP's, which is what every world without the fields is.
+    """
+    manifest_path = world_dir / f"{index}-world.json"
+    if not manifest_path.is_file():
+        return True, None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True, None
+
+    semantics = (
+        manifest.get("assets", {}).get("splats", {}).get("semantics_metadata", {})
+    )
+    flip_y = semantics.get("flip_y")
+    rotation_x = semantics.get("rotation_x")
+    # `bool` is a subclass of `int`, so an angle has to exclude it explicitly or
+    # `rotation_x: true` would quietly become one radian.
+    usable_angle = isinstance(rotation_x, (int, float)) and not isinstance(rotation_x, bool)
+    return (
+        flip_y if isinstance(flip_y, bool) else True,
+        float(rotation_x) if usable_angle else None,
+    )
+
+
+def oriented_for_classification(
+    mesh: trimesh.Trimesh, flip_y: bool, rotation_x: float | None
+) -> tuple[trimesh.Trimesh, bool]:
+    """The mesh in viewer space, plus the flip that space still needs.
+
+    Standing, walking and bumping into things are all decided by which way a
+    face points, so they have to be measured where the viewer will see them. A
+    rigid rotation leaves face indices alone, so groups taken from the result
+    still address the original mesh -- which is what gets exported, because the
+    viewer applies the rotation itself.
+
+    Same shape as `splat_to_collider` in backend/server.py; keep them together.
+    """
+    if rotation_x is None:
+        return mesh, flip_y
+    oriented = mesh.copy()
+    oriented.apply_transform(
+        trimesh.transformations.rotation_matrix(rotation_x, [1, 0, 0])
+    )
+    return oriented, False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("slug", help="World slug under public/worlds/")
@@ -356,6 +416,7 @@ def main() -> None:
     # the one `WorldCollider` scales from. Only the measurements that are
     # reported in metres convert -- see the walkable map below.
     metric_scale = read_metric_scale(world_dir, args.slug, index)
+    flip_y, rotation_x = read_orientation(world_dir, index)
 
     mesh = build_collider(
         xyz,
@@ -371,14 +432,20 @@ def main() -> None:
     metric = " (metres)" if metric_scale == 1.0 else f" = {size[0] * metric_scale:.2f} x {size[1] * metric_scale:.2f} x {size[2] * metric_scale:.2f} m"
     print(f"  room size: {size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f} world units{metric} (X x height x Z)")
 
-    floor_y = detect_floor_height(mesh)
+    # Both of these read which way a face points, so both need the mesh the
+    # viewer will show rather than the one on disk.
+    oriented, oriented_flip_y = oriented_for_classification(mesh, flip_y, rotation_x)
+    if rotation_x is not None:
+        print(f"  orientation: rotation_x={rotation_x:+.4f} (Nerfstudio Z-up), classifying in viewer space")
+
+    floor_y = detect_floor_height(oriented, flip_y=oriented_flip_y)
     ground_offset = None if floor_y is None else -floor_y
     if ground_offset is None:
         print("  warning: no dominant floor surface found; leaving ground_plane_offset unchanged")
     else:
         print(f"  floor at y={-ground_offset:+.2f} (viewer space) -> ground_plane_offset = {ground_offset:+.3f}")
 
-    groups = classify_surfaces(mesh, floor_y=floor_y)
+    groups = classify_surfaces(oriented, floor_y=floor_y, flip_y=oriented_flip_y)
     # By area, not face count: decimation leaves flat regions as a few large
     # triangles and creased regions as many small ones, so counting faces
     # reports the opposite of how much surface each class actually covers.
@@ -413,15 +480,21 @@ def main() -> None:
         # `CHARACTER_HEIGHT` are in metres, and `spawnPoint` is a viewer-space
         # position, so feeding the grid an unscaled mesh would ask for 5.9 m of
         # headroom on the 3.66x world here and report its area 13x over.
-        # Scaling only the mesh leaves the collider itself untouched.
-        metric_mesh = mesh
+        # Scaling only the mesh leaves the collider itself untouched. It is the
+        # oriented copy that gets scaled: the grid is a floor plan, so it has to
+        # be measured the same way up the classification was.
+        metric_mesh = oriented
         if metric_scale != 1.0:
-            metric_mesh = mesh.copy()
+            metric_mesh = oriented.copy()
             metric_mesh.apply_scale(metric_scale)
             print(f"  walkable map measured at {metric_scale:.4g} units per metre")
 
         png, walkable_meta = build_walkable_map(
-            metric_mesh, groups, spawn_xz=spawn, metric_scale_factor=metric_scale
+            metric_mesh,
+            groups,
+            flip_y=oriented_flip_y,
+            spawn_xz=spawn,
+            metric_scale_factor=metric_scale,
         )
         (world_dir / f"{index}-world-walkable.png").write_bytes(png)
         (world_dir / f"{index}-world-walkable.json").write_text(

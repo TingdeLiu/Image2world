@@ -127,13 +127,16 @@ export function WorldSidebar({
   useEffect(() => {
     if (!worldMenu) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeWorldMenu()
+      // Same reason the backdrop ignores clicks mid-flight: closing here would
+      // hide a delete that is still running, and its error if it fails.
+      if (event.key === 'Escape' && !menuBusy) closeWorldMenu()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [worldMenu])
+  }, [worldMenu, menuBusy])
 
   const deleteWorld = async (slug: string) => {
+    if (menuBusy) return
     setMenuBusy(true)
     setMenuError(null)
     try {
@@ -164,7 +167,7 @@ export function WorldSidebar({
 
   const renameWorld = async (slug: string, name: string) => {
     const wanted = name.trim()
-    if (!wanted) return
+    if (!wanted || menuBusy) return
     setMenuBusy(true)
     setMenuError(null)
     try {
@@ -578,10 +581,14 @@ export function WorldSidebar({
       {worldMenu && createPortal((
         <div
           className="fixed inset-0 z-[60]"
-          onPointerDown={closeWorldMenu}
+          onPointerDown={() => {
+            // Dismissing mid-flight would take the spinner and any error
+            // message with it, leaving a delete or rename running unseen.
+            if (!menuBusy) closeWorldMenu()
+          }}
           onContextMenu={(event) => {
             event.preventDefault()
-            closeWorldMenu()
+            if (!menuBusy) closeWorldMenu()
           }}
         >
           <div
@@ -603,7 +610,7 @@ export function WorldSidebar({
                   value={renameValue}
                   onChange={(event) => setRenameValue(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return
+                    if (event.key !== 'Enter' || menuBusy) return
                     event.preventDefault()
                     void renameWorld(worldMenu.slug, renameValue)
                   }}
@@ -616,11 +623,12 @@ export function WorldSidebar({
                 <div className="mt-1 flex gap-1">
                   <AppButton
                     onClick={() => void renameWorld(worldMenu.slug, renameValue)}
-                    className="flex-1 justify-center rounded bg-white/15 py-1.5 text-white hover:bg-white/25"
+                    disabled={menuBusy}
+                    className="flex-1 justify-center rounded bg-white/15 py-1.5 text-white hover:bg-white/25 disabled:opacity-60"
                   >
                     {menuBusy ? <LoadingSpinner /> : 'Rename'}
                   </AppButton>
-                  <AppButton onClick={closeWorldMenu} className="flex-1 justify-center rounded py-1.5 text-white">
+                  <AppButton onClick={closeWorldMenu} disabled={menuBusy} className="flex-1 justify-center rounded py-1.5 text-white disabled:opacity-60">
                     Cancel
                   </AppButton>
                 </div>
@@ -634,11 +642,12 @@ export function WorldSidebar({
                 <div className="mt-1 flex gap-1">
                   <AppButton
                     onClick={() => void deleteWorld(worldMenu.slug)}
-                    className="flex-1 justify-center rounded bg-red-500/25 py-1.5 text-white hover:bg-red-500/40"
+                    disabled={menuBusy}
+                    className="flex-1 justify-center rounded bg-red-500/25 py-1.5 text-white hover:bg-red-500/40 disabled:opacity-60"
                   >
                     {menuBusy ? <LoadingSpinner /> : 'Delete'}
                   </AppButton>
-                  <AppButton onClick={closeWorldMenu} className="flex-1 justify-center rounded py-1.5 text-white">
+                  <AppButton onClick={closeWorldMenu} disabled={menuBusy} className="flex-1 justify-center rounded py-1.5 text-white disabled:opacity-60">
                     Cancel
                   </AppButton>
                 </div>
