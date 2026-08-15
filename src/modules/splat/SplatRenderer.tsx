@@ -6,6 +6,7 @@ import { SplatMesh, SparkRenderer } from '@sparkjsdev/spark'
 import * as THREE from 'three'
 import { useDebugStore } from '../../store/debug'
 import { worldTransform } from '../collider/worldTransform'
+import { silenceSplatWorkerTeardown } from './workerTeardown'
 import { ViewerQuality } from '../../types/world'
 
 // Patch Spark's default vertex shader to swap the linear thin-lens CoC formula
@@ -100,6 +101,11 @@ export function SplatRenderer({
         spark.falloff = 1
       }
     })
+
+    // Installed from here rather than from the app shell because it is Spark's
+    // teardown that needs silencing, and this is the only component that mounts
+    // one. See `workerTeardown.ts`.
+    useEffect(silenceSplatWorkerTeardown, [])
 
     useEffect(() => {
       if (splatRef.current) splatRef.current.raycast = ignoreRaycast
