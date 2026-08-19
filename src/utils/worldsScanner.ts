@@ -32,6 +32,7 @@ type ProjectManifest = Record<string, unknown> & {
   created_at?: string
   updated_at?: string
   notes?: string
+  owner?: string
 }
 
 type RequestManifest = Record<string, unknown> & {
@@ -761,7 +762,16 @@ export function readSceneProject(slug: string): WorldSceneProject | undefined {
   return result.status === 'ok' ? result.project : undefined
 }
 
-export function readWorlds(): WorldEntry[] {
+/**
+ * Every world the given user may see.
+ *
+ * Worlds carry an `owner` from the moment one is generated. Ones made before
+ * that -- or before authentication was switched on at all -- have no owner, and
+ * are shared rather than hidden: an operator who turns the gate on should not
+ * watch their existing library disappear. Passing no viewer returns everything,
+ * which is what an instance with no authentication configured wants.
+ */
+export function readWorlds(viewer?: string): WorldEntry[] {
   if (!fs.existsSync(worldsDir)) return []
   const entries = fs.readdirSync(worldsDir)
     .flatMap((slug) => {
@@ -769,6 +779,8 @@ export function readWorlds(): WorldEntry[] {
       if (!fs.statSync(worldDir).isDirectory()) return []
       const project = readProjectManifest(slug)
       if (!project) return []
+      const owner = typeof project.owner === 'string' ? project.owner : undefined
+      if (viewer && owner && owner !== viewer) return []
       const manifest = readWorldManifest(slug)
       const worldVersions = readWorldVersions(slug)
       const defaultWorld = worldVersions[worldVersions.length - 1]?.world
@@ -781,6 +793,7 @@ export function readWorlds(): WorldEntry[] {
           ...(project.created_at ? { created_at: project.created_at } : {}),
           ...(project.updated_at ? { updated_at: project.updated_at } : {}),
           ...(project.notes ? { notes: project.notes } : {}),
+          ...(owner ? { owner } : {}),
         } as WorldProject,
         ...(defaultWorld ? { world: defaultWorld } : {}),
         worldVersions,

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { isAppRequest } from '../../../../utils/sameOrigin'
+import { guardRoute } from '../../../../utils/routeGuard'
 import { activeJob, listJobs } from '../../../../utils/generationJobs'
 
 export const dynamic = 'force-dynamic'
@@ -13,8 +13,7 @@ export const dynamic = 'force-dynamic'
  * without having remembered an id across the refresh.
  */
 export async function GET(request: NextRequest) {
-  if (!isAppRequest(request)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  const { denied } = await guardRoute(request)
+  if (denied) return denied
   return NextResponse.json({ jobs: listJobs(), active: activeJob() ?? null })
 }

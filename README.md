@@ -252,6 +252,8 @@ queue instead.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `IMAGEWORLD_BACKEND_URL` | `http://localhost:8000` | Address of the local FastAPI service |
+| `IMAGEWORLD_AUTH_SECRET` | unset | HMAC key for session cookies. Set **with** the password to require sign-in |
+| `IMAGEWORLD_ACCESS_PASSWORD` | unset | The password that opens this instance. Set **with** the secret |
 | `IMAGEWORLD_LOCAL_TOOLS` | unset | Re-opens the "open world folder" / "open terminal" **routes** in a production build |
 | `NEXT_PUBLIC_IMAGEWORLD_LOCAL_TOOLS` | unset | Re-shows the **buttons** for them. Set both, or you get buttons that 404 |
 | `IMAGEWORLD_SEGMENTER` | `sam2` | Segmentation backend for the retired object endpoints; `sam3` adds semantic labels |
@@ -282,9 +284,35 @@ the backend rejects any non-`GET` carrying an unknown `Origin`. Requests with no
 `Origin` at all — curl, the Next server's own calls — still go through, since
 anything running locally can already reach the files directly.
 
-The backend binds loopback by default. Nothing there is authenticated, and a
-single request can occupy the GPU for hours, so it is not something to hand to a
-shared network without thinking about it first.
+### Requiring a sign-in
+
+That check answers *where a request came from*, not *who is making it*: it stops
+another site driving this API inside your browser, and does nothing about
+someone pointing curl at the host. On a laptop that is fine. On anything
+reachable by other people it is not — a single request can occupy the GPU for
+minutes and spend a Marble key.
+
+Set both of these and the instance closes:
+
+```bash
+IMAGEWORLD_AUTH_SECRET=$(openssl rand -hex 32)
+IMAGEWORLD_ACCESS_PASSWORD='something long and yours'
+```
+
+One password, because this authenticates the person who deployed the instance
+rather than a directory of users. Signing in sets an `HttpOnly`, `SameSite=Lax`
+session cookie signed with the secret; the pages, the API and the world files
+under `/worlds/` all check it. Setting only one of the two leaves
+authentication **off** on purpose — a secret with no password would lock you
+out, and a password with no secret would issue cookies nothing could verify.
+
+Every generated world records an `owner` either way, so worlds made before you
+switch the gate on keep working, and ones made after belong to whoever made
+them. Worlds with no owner recorded are shared rather than hidden.
+
+The backend binds loopback by default and has no authentication of its own, so
+it is not something to hand to a shared network without thinking about it
+first.
 
 The variable names keep the older `IMAGEWORLD_` spelling deliberately; renaming
 them would break existing configurations. Same for the browser storage keys.

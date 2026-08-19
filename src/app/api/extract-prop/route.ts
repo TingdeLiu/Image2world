@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
 import { sceneProjectPath } from '../../../utils/worldsScanner'
-import { isAppRequest } from '../../../utils/sameOrigin'
+import { guardRoute } from '../../../utils/routeGuard'
 
 export const dynamic = 'force-dynamic'
 // Segmentation plus voxelisation of a full-resolution cloud runs for tens of
@@ -110,7 +110,8 @@ export async function POST(request: NextRequest) {
   // Segmentation plus voxelisation occupies the GPU for tens of seconds and
   // rewrites the world's props on disk. Neither should be reachable from a page
   // the user merely has open somewhere else.
-  if (!isAppRequest(request)) return badRequest('Forbidden', 403)
+  const { denied } = await guardRoute(request)
+  if (denied) return denied
 
   const { searchParams } = new URL(request.url)
   const outDir = worldOutputDir(searchParams.get('slug'))

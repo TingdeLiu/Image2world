@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { isAppRequest } from '../../../../../utils/sameOrigin'
+import { guardRoute } from '../../../../../utils/routeGuard'
 import { cancelJob, readJob } from '../../../../../utils/generationJobs'
 
 export const dynamic = 'force-dynamic'
@@ -9,9 +9,8 @@ interface RouteContext {
 }
 
 export async function GET(request: NextRequest, { params }: RouteContext) {
-  if (!isAppRequest(request)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  const { denied } = await guardRoute(request)
+  if (denied) return denied
   const { id } = await params
   const job = readJob(id)
   if (!job) return NextResponse.json({ error: 'Generation job not found.' }, { status: 404 })
@@ -24,9 +23,8 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
  * the last poll yet is a race, not a mistake.
  */
 export async function DELETE(request: NextRequest, { params }: RouteContext) {
-  if (!isAppRequest(request)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  const { denied } = await guardRoute(request)
+  if (denied) return denied
   const { id } = await params
   const job = cancelJob(id)
   if (!job) return NextResponse.json({ error: 'Generation job not found.' }, { status: 404 })

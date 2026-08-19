@@ -3,7 +3,8 @@ import path from 'path'
 import { NextRequest, NextResponse } from 'next/server'
 import { readWorlds, worldDirPath } from '../../../utils/worldsScanner'
 import { LOCAL_TOOLS_ENABLED } from '../../../utils/localTools'
-import { isAppRequest } from '../../../utils/sameOrigin'
+import { guardRoute } from '../../../utils/routeGuard'
+import { currentUserId } from '../../../utils/auth'
 import { moveDirectory, slugify } from '../../../utils/worldPublish'
 
 export const dynamic = 'force-dynamic'
@@ -21,9 +22,12 @@ const inFlight = new Set<string>()
 // Removing a world means removing hundreds of megabytes, which is not instant.
 export const maxDuration = 120
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const { denied } = await guardRoute(request)
+  if (denied) return denied
+
   try {
-    const worlds = readWorlds()
+    const worlds = readWorlds(await currentUserId(request))
     return NextResponse.json(worlds, {
       headers: {
         'Cache-Control': 'no-store, max-age=0, must-revalidate',
@@ -45,7 +49,7 @@ export async function GET() {
  * reverse would be a world the router cannot find.
  */
 export async function PATCH(request: NextRequest) {
-  if (!LOCAL_TOOLS_ENABLED || !isAppRequest(request)) {
+  if (!LOCAL_TOOLS_ENABLED || (await guardRoute(request)).denied) {
     return new NextResponse('Not found', { status: 404 })
   }
 
@@ -145,7 +149,7 @@ export async function PATCH(request: NextRequest) {
  * `next dev`, see below -- it is removed in place.
  */
 export async function DELETE(request: NextRequest) {
-  if (!LOCAL_TOOLS_ENABLED || !isAppRequest(request)) {
+  if (!LOCAL_TOOLS_ENABLED || (await guardRoute(request)).denied) {
     return new NextResponse('Not found', { status: 404 })
   }
 

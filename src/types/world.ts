@@ -94,6 +94,12 @@ export interface WorldProject {
   created_at?: string
   updated_at?: string
   notes?: string
+  /**
+   * Who generated this world. Absent on anything made before ownership was
+   * recorded, which is treated as shared rather than as belonging to nobody --
+   * see `readWorlds`.
+   */
+  owner?: string
 }
 
 export interface WorldObjectAsset {
