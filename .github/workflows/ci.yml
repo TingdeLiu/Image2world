@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web (lint, types, tests, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The unit tests and the asset scripts are .mts run through
+          # --experimental-strip-types, which needs a recent Node.
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run test
+
+      # Last, because it is the slowest and the three checks above localise a
+      # failure far better than a bundler error does.
+      - run: npm run build
+
+  backend:
+    name: Backend (CPU tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      # Deliberately not backend/requirements.txt: that pulls torch, diffusers
+      # and the SAM/TripoSR stack, several GB of wheels for models no runner
+      # can execute. These are what the geometry and job-state tests import.
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy scipy scikit-image trimesh fastapi
+
+      # Three suites are not run here, and it is worth being explicit about it:
+      #   test_backend.py    -- an environment smoke script, not tests; imports torch.
+      #   test_client.py     -- drives a live server on localhost:8000.
+      #   test_multiview.py  -- imports multiview_splat, which imports torch.
+      # Everything else is pure CPU geometry or job-state logic.
+      - name: Run CPU test suites
+        run: |
+          pytest -q \
+            backend/test_collider.py \
+            backend/test_metric_scale.py \
+            backend/test_props.py \
+            backend/test_walkable.py \
+            backend/test_reconstruction_jobs.py \
+            backend/test_unload.py
