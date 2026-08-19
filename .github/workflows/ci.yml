@@ -53,7 +53,7 @@ jobs:
       - name: Install CPU test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest numpy scipy scikit-image trimesh fastapi
+          python -m pip install pytest numpy scipy scikit-image trimesh fastapi python-multipart
 
       # Three suites are not run here, and it is worth being explicit about it:
       #   test_backend.py    -- an environment smoke script, not tests; imports torch.
