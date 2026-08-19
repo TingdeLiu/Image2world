@@ -1621,12 +1621,82 @@ localhost:8000 的活服务；`test_multiview.py` 经 `multiview_splat` 间接 i
 
 ---
 
+## 3.25 ⏳ 生成不再属于那条 HTTP 连接（2026-08-19）
+
+### A. 问题
+
+`POST /api/generate` 一直是「请求拥有工作」：进度顺着这条连接流回来，
+而 `request.signal` 一旦 abort，管线就被拆掉、暂存世界被删。
+
+于是刷新一下、合上笔记本、隧道抖一下，一次跑了八分钟的 Marble 生成就没了——
+**而且钱已经花掉了**。
+
+### B. 方案
+
+`src/utils/generationJobs.ts`：POST 建一个任务、把管线**脱离自己**启动、
+立刻返回 id；进度写进文件，浏览器轮询。这正是视频那条路一直以来的形状
+（`backend/reconstruction_jobs.py`），只是这次在 Node 侧——因为图片管线在这边，
+它握着 Marble key，那个 key 不落盘也不进后端。
+
+Marble key 只活在启动闭包里；任务文件只记 `backend: 'marble' | 'sharp'`。
+有一条测试直接对 job.json 的原文断言不含 "key"。
+
+### C. 一个设计被实测打回：内存里的所有权不成立
+
+第一版用一个模块级 `Map<jobId, AbortController>` 判断「这个进程还在跑它吗」，
+不在就判 `interrupted`。单元测试全绿，实测立刻露馅：
+
+任务明明还活着（桩后端还挂着、暂存目录还在），从 `/api/generate/jobs` 读却是
+`interrupted`。**Next 给每个 route handler 单独打包，模块级状态不共享**——
+`/api/generate` 的 `Map` 不是 `/api/generate/jobs/[id]` 的 `Map`。
+
+同一个原因还有第二个后果，而且更糟：`DELETE` 那个 bundle 里根本找不到
+controller，取消只会把文件改成 canceled，**管线照跑不误**。
+
+改成两件事都走文件：
+
+* **心跳**：`trackJob` 每 2 秒写一次 `heartbeatAt`。读取方看到 `running`
+  但心跳超过 60 秒没动，才判 `interrupted`。
+* **取消**：同一个 tick 顺便回读自己的状态，发现不再是 `running` 就 abort
+  自己的 controller。所以取消跨 bundle 也能真正到达管线。
+
+60 秒相对 2 秒很宽松，是刻意的：事件循环忙一下不该被当成死亡。
+
+### D. 并发
+
+`activeJob()` 非空就返回 409，并把**正在跑的那个任务的 id** 一起给前端——
+前端据此接管它，而不是报「冲突」。这也是刷新后重新接上的同一条路径：
+modal 打开时读 `GET /api/generate/jobs` 的 `active`。
+
+一次只跑一个不是限制：GPU 本来就在后端串行，而「只有一个」正是重连能省掉
+「记住 id 跨刷新」的原因。
+
+### E. 验证（起了一个只挂不答的桩后端，让任务停住）
+
+| 检查 | 结果 |
+|---|---|
+| POST 立即返回 | 202 + running 任务 |
+| curl 退出后任务是否继续 | 继续跑 >12 s |
+| 从另一个 bundle 轮询 | 连续 4 次都是 running（心跳生效） |
+| 运行中再次 POST | 409 + 运行中任务的 id |
+| 从 DELETE bundle 取消 | 6 秒内 canceled，暂存世界被删 |
+| 重复取消 | 200，幂等 |
+| 取消后重新开始 | 202 |
+| 已发布的世界 | 8 个，未受影响 |
+
+**第一轮实测我自己也读错了一次**：判据写成 `ls .staging`，而空的父目录同样返回
+成功，于是「清理干净」被读成「有残留」。改成比对具体的 slug 目录名才是对的。
+
+---
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：
 
 ### 4.1 引入 Celery/Redis 推理队列 (性能优化 - 强烈推荐)
-目前前端 Next.js 调用 `/api/generate` 采用同步长连接机制。在高并发或 GPU 负载较满时，很容易导致网关超时（Gateway Timeout 504）。
+> **注**：§3.25 已把 `/api/generate` 改成任务制，单机场景下的「刷新即丢」和 504 都不再存在。下面这套仍然成立的部分是**多机**：任务状态现在写在本地磁盘，跨实例共享需要 Redis 或数据库。
+
+原先前端 Next.js 调用 `/api/generate` 采用同步长连接机制。在高并发或 GPU 负载较满时，很容易导致网关超时（Gateway Timeout 504）。
 * **改造方法**：
   1. 在 Next.js 或独立的 Python 后端部署 Celery 异步框架，使用 Redis 缓存队列。
   2. 用户上传图片后，生成任务立即入队，Next.js `/api/generate` 立即返回 `{"task_id": "xxx", "status": "queued"}`。

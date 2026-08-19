@@ -28,18 +28,18 @@ interface GenerationUiProgress {
   detail?: string
 }
 
-type GenerationStreamEvent =
-  | ({ type: 'progress' } & GenerationUiProgress)
-  | { type: 'complete'; success: true; slug: string }
-  | {
-      type: 'error'
-      error: {
-        code: string
-        message: string
-        stage: GenerationStage
-        retryable: boolean
-      }
-    }
+/** `/api/generate/jobs/<id>`. Mirrors `src/utils/generationJobs.ts`. */
+interface GenerationJob {
+  id: string
+  name: string
+  status: 'running' | 'complete' | 'failed' | 'canceled' | 'interrupted'
+  stage: GenerationStage
+  progress: number
+  message: string
+  detail?: string
+  slug?: string
+  error?: string
+}
 
 const INITIAL_GENERATION_PROGRESS: GenerationUiProgress = {
   stage: 'initializing',
@@ -143,47 +143,50 @@ function videoProgress(job: ReconstructionJob): GenerationUiProgress {
   }
 }
 
-async function readGenerationStream(
-  response: Response,
+/**
+ * Follow a generation to its end by polling.
+ *
+ * The pipeline used to stream progress down the POST that started it, which
+ * made the connection load-bearing: closing the tab tore the work down. Now the
+ * work is a job on disk and this is only a view of it, so a lost connection --
+ * or a lost tab -- costs nothing but the progress bar.
+ */
+async function followGenerationJob(
+  jobId: string,
   onProgress: (progress: GenerationUiProgress) => void,
+  signal: AbortSignal,
 ) {
-  if (!response.body) throw new Error('The generation server did not return a progress stream.')
+  let job = await readGenerationJob(jobId, signal)
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let completedSlug = ''
-
-  const processLine = (line: string) => {
-    if (!line.trim()) return
-    const event = JSON.parse(line) as GenerationStreamEvent
-    if (event.type === 'progress') {
-      onProgress(event)
-      return
-    }
-    if (event.type === 'complete') {
-      completedSlug = event.slug
-      return
-    }
-    throw new Error(event.error.message)
+  while (job.status === 'running') {
+    onProgress(jobProgress(job))
+    await abortableDelay(1_500, signal)
+    job = await readGenerationJob(jobId, signal)
   }
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      buffer += decoder.decode(value, { stream: !done })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-      for (const line of lines) processLine(line)
-      if (done) break
-    }
-    if (buffer.trim()) processLine(buffer)
-  } finally {
-    reader.releaseLock()
-  }
+  if (job.status === 'complete' && job.slug) return job.slug
+  throw new Error(job.error || job.message || `Generation ${job.status}.`)
+}
 
-  if (!completedSlug) throw new Error('The generation stream ended before the world was published.')
-  return completedSlug
+async function readGenerationJob(jobId: string, signal: AbortSignal) {
+  const response = await fetch(`/api/generate/jobs/${jobId}`, {
+    cache: 'no-store',
+    headers: APP_REQUEST_HEADERS,
+    signal,
+  })
+  if (!response.ok) throw new Error(await responseErrorMessage(response))
+  return (await response.json() as { job: GenerationJob }).job
+}
+
+function jobProgress(job: GenerationJob): GenerationUiProgress {
+  return {
+    stage: job.stage,
+    // The job reaches 100 only when it is complete; holding the bar just short
+    // of the end keeps "done" meaning the world is actually openable.
+    progress: Math.min(98, Math.max(1, Math.round(job.progress || 1))),
+    message: job.message,
+    detail: job.detail,
+  }
 }
 
 function friendlyFileName(file: File) {
@@ -247,6 +250,8 @@ export function CreateWorldModal({ open, onClose }: Props) {
   const [cameraHeight, setCameraHeight] = useState(1.6)
   const generationAbortRef = useRef<AbortController | null>(null)
   const activeVideoJobRef = useRef<string | null>(null)
+  const activeGenerationJobRef = useRef<string | null>(null)
+  const generatingRef = useRef(false)
   const modalTitleId = useId()
 
   // The key is deliberately left out of the reset: it is a setting, not part of
@@ -290,6 +295,54 @@ export function CreateWorldModal({ open, onClose }: Props) {
     }
   }, [])
 
+  /**
+   * Reattach to a generation that is already running.
+   *
+   * Reloading the page no longer stops the work, so without this the modal
+   * would offer to start a second one and be told the GPU is busy. Called when
+   * the modal opens, and after a 409 says one is already in flight.
+   */
+  const watchGenerationJob = useCallback(async (jobId: string, jobName: string) => {
+    if (generatingRef.current) return
+    generatingRef.current = true
+    setGenerating(true)
+    setGenerationError('')
+    setWorldName((current) => current || jobName)
+
+    const controller = new AbortController()
+    generationAbortRef.current = controller
+    activeGenerationJobRef.current = jobId
+
+    try {
+      const slug = await followGenerationJob(jobId, setGenerationProgress, controller.signal)
+      closeCreateModal()
+      resetCreateForm()
+      router.push(`/${slug}`)
+    } catch (error: unknown) {
+      if (controller.signal.aborted) return
+      setGenerationError(error instanceof Error ? error.message : String(error))
+    } finally {
+      generatingRef.current = false
+      if (generationAbortRef.current === controller) generationAbortRef.current = null
+      activeGenerationJobRef.current = null
+      setGenerating(false)
+    }
+  }, [closeCreateModal, resetCreateForm, router])
+
+  const resumeActiveGeneration = useCallback(async () => {
+    try {
+      const response = await fetch('/api/generate/jobs', {
+        cache: 'no-store',
+        headers: APP_REQUEST_HEADERS,
+      })
+      if (!response.ok) return
+      const { active } = await response.json() as { active: GenerationJob | null }
+      if (active) void watchGenerationJob(active.id, active.name)
+    } catch {
+      // Nothing to reattach to is the normal case, not an error worth showing.
+    }
+  }, [watchGenerationJob])
+
   useEffect(() => {
     if (!selectedFile) {
       setSelectedFileUrl('')
@@ -306,13 +359,14 @@ export function CreateWorldModal({ open, onClose }: Props) {
     if (!DEMO_MODE) {
       setMarbleKey(readStoredMarbleKey())
       void checkBackend()
+      void resumeActiveGeneration()
     }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeCreateModal()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [checkBackend, closeCreateModal, open])
+  }, [checkBackend, closeCreateModal, open, resumeActiveGeneration])
 
   useEffect(() => () => {
     generationAbortRef.current?.abort()
@@ -398,6 +452,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
     }
 
     storeMarbleKey(marbleKey.trim())
+    generatingRef.current = true
     setGenerating(true)
     setGenerationProgress({
       stage: 'initializing',
@@ -426,14 +481,30 @@ export function CreateWorldModal({ open, onClose }: Props) {
         formData.append('name', worldName)
         if (usingMarble) formData.append('marbleApiKey', marbleKey.trim())
 
+        // Only the upload is tied to this request; the generation it starts
+        // outlives it, so the abort signal stops here and cancellation goes
+        // through the job instead.
         const res = await fetch('/api/generate', {
           method: 'POST',
           headers: APP_REQUEST_HEADERS,
           body: formData,
           signal: generationController.signal,
         })
+        if (res.status === 409) {
+          // Another generation is already running -- most likely this one,
+          // started before a reload. Watch it instead of reporting a clash.
+          const { jobId } = await res.json() as { jobId?: string }
+          if (jobId) {
+            generatingRef.current = false
+            void watchGenerationJob(jobId, worldName.trim())
+            return
+          }
+        }
         if (!res.ok) throw new Error(await responseErrorMessage(res))
-        slug = await readGenerationStream(res, setGenerationProgress)
+        const { job } = await res.json() as { job: GenerationJob }
+        activeGenerationJobRef.current = job.id
+        setGenerationProgress(jobProgress(job))
+        slug = await followGenerationJob(job.id, setGenerationProgress, generationController.signal)
       }
       setGenerationProgress({
         stage: 'finalizing',
@@ -456,7 +527,9 @@ export function CreateWorldModal({ open, onClose }: Props) {
       if (generationAbortRef.current === generationController) {
         generationAbortRef.current = null
       }
+      generatingRef.current = false
       activeVideoJobRef.current = null
+      activeGenerationJobRef.current = null
       setGenerating(false)
     }
   }
@@ -467,10 +540,18 @@ export function CreateWorldModal({ open, onClose }: Props) {
       message: 'Canceling generation',
       detail: 'Stopping the active backend stage and cleaning temporary files',
     }))
-    const jobId = activeVideoJobRef.current
+    const videoJobId = activeVideoJobRef.current
+    const generationJobId = activeGenerationJobRef.current
     generationAbortRef.current?.abort()
-    if (jobId) {
-      void fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${jobId}`, { method: 'DELETE' })
+    if (videoJobId) {
+      void fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${videoJobId}`, { method: 'DELETE' })
+    }
+    // Aborting the poller only stops watching; the job has to be told.
+    if (generationJobId) {
+      void fetch(`/api/generate/jobs/${generationJobId}`, {
+        method: 'DELETE',
+        headers: APP_REQUEST_HEADERS,
+      })
     }
   }
 

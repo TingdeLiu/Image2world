@@ -304,6 +304,14 @@ share `.next` and will clobber each other, and the symptom is a runtime
 not. To check types while the dev server runs, use `npm run lint && npx tsc
 --noEmit`.
 
+Image generation runs as a job rather than as a long HTTP request:
+`POST /api/generate` returns a job id, `GET /api/generate/jobs/<id>` reports
+progress, and `DELETE` on the same URL cancels. `GET /api/generate/jobs` names
+whichever generation is still in flight, which is how a reloaded page finds its
+way back to one. Closing the tab no longer stops the work, and starting a second
+generation while one is running answers 409 with the running job's id instead of
+queueing behind the GPU lock.
+
 The same checks run on every push and pull request via
 `.github/workflows/ci.yml`, alongside the backend suites that need no GPU. Three
 backend suites are deliberately left out of CI — an environment smoke script, one

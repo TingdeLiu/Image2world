@@ -6,10 +6,24 @@ import { MarbleError, generateWorldWithMarble } from './marble'
 import { isAppRequest } from '../../../utils/sameOrigin'
 import { buildWalkableMap } from '../../../utils/walkableMap'
 import { writeSpzLevels, type SplatLevelFile } from '../../../utils/spz'
+import {
+  activeJob,
+  cancelJob,
+  completeJob,
+  createJob,
+  failJob,
+  readJob,
+  reportProgress,
+  trackJob,
+  type GenerationStage,
+  type GenerationProgressPatch,
+} from '../../../utils/generationJobs'
 
 export const dynamic = 'force-dynamic'
-// The local SHARP path finishes in well under a minute, but a Marble generation
-// routinely runs eight minutes or more.
+// POST now returns as soon as the job exists, so this no longer bounds a
+// generation -- it bounds the upload. It stays generous because the work the
+// handler kicks off runs in the same process, and a host that kills the
+// function would kill that too.
 export const maxDuration = 900
 
 const AI_BACKEND_URL = (process.env.IMAGEWORLD_BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '')
@@ -25,17 +39,7 @@ const BACKEND_TIMEOUTS = {
   collider: 120_000,
 } as const
 
-type GenerationStage = 'initializing' | 'splat' | 'finalizing'
-
-interface GenerationProgress {
-  type: 'progress'
-  stage: GenerationStage
-  progress: number
-  message: string
-  detail?: string
-}
-
-type ProgressReporter = (progress: Omit<GenerationProgress, 'type'>) => void
+type ProgressReporter = (progress: GenerationProgressPatch) => void
 
 class GenerationPipelineError extends Error {
   constructor(
@@ -535,74 +539,56 @@ export async function POST(request: NextRequest) {
     return generationErrorResponse('Image is too large. Maximum size is 10 MB.', 413)
   }
 
-  const encoder = new TextEncoder()
-  const generationController = new AbortController()
-  const abortGeneration = () => generationController.abort()
-  request.signal.addEventListener('abort', abortGeneration, { once: true })
-  let streamClosed = false
+  // One at a time. The GPU is serialised downstream anyway, and refusing here
+  // gives a clear answer instead of a second job queueing behind an invisible
+  // lock for eight minutes.
+  const inFlight = activeJob()
+  if (inFlight) {
+    return NextResponse.json(
+      {
+        error: {
+          code: 'generation_in_flight',
+          message: `"${inFlight.name}" is still generating. Wait for it or cancel it first.`,
+          stage: 'initializing',
+          retryable: true,
+        },
+        jobId: inFlight.id,
+      },
+      { status: 409 },
+    )
+  }
 
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const send = (event: object) => {
-        if (streamClosed) return
-        try {
-          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
-        } catch {
-          streamClosed = true
-          generationController.abort()
-        }
+  const job = createJob(name, marbleApiKey ? 'marble' : 'sharp')
+  const signal = trackJob(job.id)
+
+  // Deliberately not awaited, and deliberately not tied to `request.signal`:
+  // the whole point is that the generation outlives the request that asked for
+  // it. The key stays in this closure and is never written to the job file.
+  void runGeneration(
+    { file, name, marbleApiKey },
+    (progress) => reportProgress(job.id, progress),
+    signal,
+  )
+    .then(({ slug }) => {
+      completeJob(job.id, slug)
+    })
+    .catch((error: unknown) => {
+      const pipelineError = error instanceof GenerationPipelineError ? error : undefined
+      const marbleError = error instanceof MarbleError ? error : undefined
+      const canceled = error instanceof GenerationCanceledError
+        || (error instanceof DOMException && error.name === 'AbortError')
+      if (canceled) {
+        // `cancelJob` already recorded the outcome; this is just the unwind.
+        cancelJob(job.id)
+        return
       }
-
-      void runGeneration(
-        { file, name, marbleApiKey },
-        (progress) => send({ type: 'progress', ...progress }),
-        generationController.signal,
+      failJob(
+        job.id,
+        error instanceof Error ? error.message : 'Generation failed.',
+        marbleError ? 'marble_error' : pipelineError?.code || 'generation_failed',
+        marbleError?.retryable ?? pipelineError?.retryable !== false,
       )
-        .then(({ slug }) => {
-          send({ type: 'complete', success: true, slug })
-        })
-        .catch((error: unknown) => {
-          const pipelineError = error instanceof GenerationPipelineError ? error : undefined
-          const marbleError = error instanceof MarbleError ? error : undefined
-          const canceled = error instanceof GenerationCanceledError
-            || (error instanceof DOMException && error.name === 'AbortError')
-          send({
-            type: 'error',
-            error: {
-              code: canceled
-                ? 'generation_canceled'
-                : marbleError
-                  ? 'marble_error'
-                  : pipelineError?.code || 'generation_failed',
-              message: canceled
-                ? 'Generation canceled. No world was published.'
-                : error instanceof Error
-                  ? error.message
-                  : 'Generation failed.',
-              stage: pipelineError?.stage || 'splat',
-              retryable: canceled || (marbleError?.retryable ?? pipelineError?.retryable !== false),
-            },
-          })
-        })
-        .finally(() => {
-          request.signal.removeEventListener('abort', abortGeneration)
-          if (!streamClosed) {
-            streamClosed = true
-            controller.close()
-          }
-        })
-    },
-    cancel() {
-      streamClosed = true
-      generationController.abort()
-    },
-  })
+    })
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'application/x-ndjson; charset=utf-8',
-      'Cache-Control': 'no-store',
-      'X-Accel-Buffering': 'no',
-    },
-  })
+  return NextResponse.json({ job: readJob(job.id) ?? job }, { status: 202 })
 }
