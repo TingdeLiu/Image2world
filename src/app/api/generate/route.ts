@@ -5,6 +5,7 @@ import { createBinaryPlyLod } from '../../../utils/plyLod'
 import { MarbleError, generateWorldWithMarble } from './marble'
 import { isAppRequest } from '../../../utils/sameOrigin'
 import { buildWalkableMap } from '../../../utils/walkableMap'
+import { writeSpzLevels, type SplatLevelFile } from '../../../utils/spz'
 
 export const dynamic = 'force-dynamic'
 // The local SHARP path finishes in well under a minute, but a Marble generation
@@ -387,10 +388,12 @@ async function runGeneration(
       message: 'Building point-cloud detail levels',
       detail: 'Preparing 100k, 150k, and 500k variants',
     })
+    const splatLevels: SplatLevelFile[] = [{ level: 'full_res', ply: plyBuffer }]
     for (const [label, vertexCount] of PLY_LOD_TARGETS) {
       const lodBuffer = createBinaryPlyLod(plyBuffer, vertexCount)
       if (lodBuffer && lodBuffer.length < plyBuffer.length) {
         fs.writeFileSync(path.join(worldOutDir, `0-world-${label}.ply`), lodBuffer)
+        splatLevels.push({ level: label, ply: lodBuffer })
       }
     }
 
@@ -412,7 +415,17 @@ async function runGeneration(
     // the largest connected region stands in for "the room".
     await buildWalkableMap(AI_BACKEND_URL, worldOutDir, { flipY: true, metricScale: 1, signal })
 
-    // 6. Minimal world manifest so the scanner picks up the local .ply splat.
+    // 6. Compress the splats for delivery. This runs after the collision mesh
+    // because that step reads `0-world-500k.ply`, and this one deletes it.
+    report({
+      stage: 'finalizing',
+      progress: 92,
+      message: 'Compressing the world for delivery',
+      detail: 'Re-encoding the point cloud as SPZ',
+    })
+    await writeSpzLevels(worldOutDir, 0, splatLevels)
+
+    // 7. Minimal world manifest so the scanner picks up the local splat.
     const worldJson = {
       world_id: slug,
       display_name: name,
@@ -435,7 +448,7 @@ async function runGeneration(
       copyRecursiveSync(ambienceDir, path.join(worldDir, 'output', 'sfx'))
     }
 
-    // 7. Write scene.json. `instances` stays empty: the world is the scene, and
+    // 8. Write scene.json. `instances` stays empty: the world is the scene, and
     // the placement editor can still add props from other worlds by hand.
     report({
       stage: 'finalizing',
