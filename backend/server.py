@@ -5,6 +5,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "TripoSR"))
 
 import io
 import gc
+from typing import Any
 import asyncio
 import base64
 import torch
@@ -20,9 +21,11 @@ from simple_lama_inpainting import SimpleLama
 
 try:  # package import under pytest, script import under `python backend/server.py`
     from .gpu_scheduler import run_with_gpu_lock
+    from . import reconstruction_jobs
     from .reconstruction_jobs import router as reconstruction_jobs_router
 except ImportError:  # pragma: no cover - exercised by the production entrypoint
     from gpu_scheduler import run_with_gpu_lock
+    import reconstruction_jobs
     from reconstruction_jobs import router as reconstruction_jobs_router
 
 # Every endpoint here is unauthenticated and several of them tie up the GPU for
@@ -198,6 +201,65 @@ def clear_vram():
         torch.cuda.ipc_collect()
 
 
+# --- Releasing VRAM ----------------------------------------------------------
+#
+# Every model in this file is a lazily-built module global that, once loaded, is
+# never released. `clear_vram()` returns the allocator's *cached* blocks to the
+# driver, but it cannot touch weights a live reference still holds, so the
+# process keeps whatever it has loaded until it exits.
+#
+# That is harmless while all the work happens in here -- `run_heavy` already
+# serialises it -- and it stops being harmless the moment something outside this
+# process needs the card. `splatfacto_prototype.py` runs `ns-train` as its own
+# subprocess, which cannot see this process's allocations, so a video
+# reconstruction started after an image generation OOMs on a 16 GB card with the
+# weights still resident here.
+#
+# Dropping the reference is all it takes. Nothing here carries state between
+# requests: the next call lazy-loads again, paying the load time once.
+
+MODEL_GLOBALS = (
+    "sam_generator",
+    "sam2_image_predictor",
+    "sam3_model",
+    "sam3_processor",
+    "tsr_model",
+    "sfx_pipeline",
+    "lama_model",
+    "sharp_predictor",
+)
+
+
+def loaded_models() -> list[str]:
+    """Which model globals currently hold weights."""
+    return [name for name in MODEL_GLOBALS if globals().get(name) is not None]
+
+
+def unload_models() -> dict[str, Any]:
+    """Drop every loaded model and hand its VRAM back to the driver.
+
+    Safe to call at any time -- callers that need a model simply reload it. It
+    is not safe to call *during* inference, so anything that runs on the GPU
+    takes `GPU_JOB_LOCK` first.
+    """
+    released = loaded_models()
+    for name in released:
+        globals()[name] = None
+    clear_vram()
+
+    freed = {}
+    if torch.cuda.is_available():
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        freed = {
+            "vram_free_bytes": int(free_bytes),
+            "vram_total_bytes": int(total_bytes),
+        }
+    if released:
+        print(f"Unloaded models: {', '.join(released)}")
+    return {"released": released, **freed}
+
+
+
 # --- Concurrency -------------------------------------------------------------
 #
 # Every model here is a lazily-built global on a single GPU, so two requests
@@ -222,6 +284,21 @@ async def run_heavy(fn, *args, **kwargs):
 async def run_off_loop(fn, *args, **kwargs):
     """Run short blocking work off the event loop without taking the lock."""
     return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+@app.post("/api/unload")
+async def unload_models_endpoint():
+    """Release model weights so another process can use the GPU.
+
+    Goes through `run_heavy` so it queues behind any inference in flight rather
+    than pulling weights out from under it.
+    """
+    return await run_heavy(unload_models)
+
+
+# Reconstruction spawns `ns-train` as its own process while holding the GPU
+# lock; this is how it reaches back in to free the weights this process holds.
+reconstruction_jobs.release_gpu_models = unload_models
 
 # --- Segmentation backends (SAM 2 automatic + SAM 3 concept-promptable) -------
 
