@@ -60,9 +60,11 @@ jobs:
       #   test_client.py     -- drives a live server on localhost:8000.
       #   test_multiview.py  -- imports multiview_splat, which imports torch.
       # Everything else is pure CPU geometry or job-state logic.
+      # `python -m pytest`, not `pytest`: only the module form puts the repo
+      # root on sys.path, and every suite imports `backend.*` from there.
       - name: Run CPU test suites
         run: |
-          pytest -q \
+          python -m pytest -q \
             backend/test_collider.py \
             backend/test_metric_scale.py \
             backend/test_props.py \
