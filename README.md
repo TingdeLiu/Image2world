@@ -199,10 +199,11 @@ public/worlds/<slug>/
 └── output/
     ├── world/
     │   ├── 0-world.json         # Asset manifest + coordinate metadata
-    │   ├── 0-world-full_res.spz # Gaussian splat (.ply from SHARP, .spz from Marble)
+    │   ├── 0-world-full_res.spz # Gaussian splat, ~4-10x smaller than the PLY it came from
     │   ├── 0-world-500k.spz     # Viewer LODs
     │   ├── 0-world-150k.spz
     │   ├── 0-world-100k.spz
+    │   ├── 0-world-full_res.ply # Lossless original; props are cut from this
     │   ├── 0-world.glb          # Collision mesh
     │   └── 0-world-pano.png     # 360 panorama (Marble only)
     └── sfx/                     # World ambience
@@ -303,6 +304,12 @@ share `.next` and will clobber each other, and the symptom is a runtime
 not. To check types while the dev server runs, use `npm run lint && npx tsc
 --noEmit`.
 
+The same checks run on every push and pull request via
+`.github/workflows/ci.yml`, alongside the backend suites that need no GPU. Three
+backend suites are deliberately left out of CI — an environment smoke script, one
+that drives a live server, and one that reaches torch through
+`multiview_splat` — and the workflow says so where it skips them.
+
 Tests alone (Node's built-in runner, no extra dependencies):
 
 ```bash
@@ -321,6 +328,20 @@ Regenerate PLY LODs after replacing a full-resolution splat:
 ```bash
 npm run assets:lod
 ```
+
+Compress a world's splats for delivery. Generation does this automatically; the
+script backfills worlds made before it did, and skips any level that already has
+an `.spz`:
+
+```bash
+npm run assets:spz
+```
+
+That only adds files. The decimated PLYs it supersedes have no reader left once
+their `.spz` exists, but they are your own generated data, so removing them is a
+separate opt-in — `npm run assets:spz -- --prune`. `full_res.ply` is never
+pruned: it is the lossless original that `/api/extract-prop` cuts props from and
+that `assets:lod` rebuilds the detail levels from.
 
 Rebuild the background collision proxy and ground calibration for a world.
 Generation does this automatically; the script is for re-running it with

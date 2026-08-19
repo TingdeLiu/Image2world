@@ -951,6 +951,154 @@ splat 端把这些 gaussian 的 opacity 置零。这是数天的工作量，且�
 
 ---
 
+## 3.22 📦 交付体积：本地世界一直在发未压缩的点云（2026-08-19）
+
+### A. 问题
+
+Marble 的世界是 `.spz`，本地生成的世界是 `.ply`——同一个 viewer，两种体积。
+
+`public/worlds/room1-cbti0t/output/world/0-world-100k.ply` 是 5,600,753 字节，
+除以 100k splat 正好 **56 B/splat**，即 14 个 float32（xyz + f_dc×3 + opacity +
+scale×3 + rot×4），一个都没量化。Marble 同档位的 `.spz` 是 1.12 MB。
+
+High 画质走 `full_res`，于是首屏要下 47–203 MB。磁盘上 902 MB 的世界里，
+784 MB 是可压缩的 PLY。
+
+### B. 方案
+
+Spark 自己就带编码器：`@sparkjsdev/spark` 导出 `transcodeSpz`，`SplatMesh`
+两种格式都能读。所以这不是换格式，只是换字节数——viewer 侧一行没改。
+
+新增 `src/utils/spz.ts`，接在两条管线生成 LOD 的同一处
+（`api/generate/route.ts`、`api/video-reconstruction/finalize/route.ts`），
+另有 `npm run assets:spz` 回填已有世界。
+
+**`full_res.ply` 保留，LOD 的 PLY 删掉。** 前者是无损原件，`/api/extract-prop`
+在运行时从它身上抠道具，`npm run assets:lod` 也从它重建 LOD；后者在 `.spz`
+写出之后就没有任何读者了——碰撞体是在同一趟管线里、更早的时候读 `500k.ply` 的。
+
+`worldsScanner` 原本用「目录列举里最后一个」决定同一档位取 `.ply` 还是 `.spz`，
+两者并存时结果不确定。改成显式优先 `.spz`。这顺带给了一条退路：删掉某个世界的
+`.spz`，扫描器自动退回它的 `.ply`。
+
+### C. 实测
+
+回填 20 个文件，**784 MB PLY → 138 MB SPZ**：
+
+| 世界 | full_res PLY | full_res SPZ | 比例 |
+|---|---|---|---|
+| singleview-meetingroom | 47.4 MB | 11.6 MB | 4.1x |
+| multiview-meetingroom | 56.8 MB | 15.4 MB | 3.7x |
+| room1-cbti0t | 66.1 MB | 16.0 MB | 4.1x |
+| family-splatfacto-integration | 203.5 MB | 18.8 MB | **10.8x** |
+
+Splatfacto 那个是 10.8x，因为它的 PLY 每个 splat 存了 45 个 float32 的球谐系数
+和 3 个从来没人读的法线。**球谐没有被丢掉**——回读确认 `shDegree=3` 完整保留。
+
+### D. 一个只有全量比对才会发现的差别
+
+只看头 5 个 splat，两种格式完全一致。全量比对（把两边都过一遍 Spark 自己的
+`setPackedSplat` 量化器，也就是真正送进 GPU 的那 4 个 uint32）才看出分野：
+
+* **SHARP 世界（room1，1,179,648 splat）：每个通道最大差 1/255，无一超出 SPZ
+  的表示范围。等价于逐位相同。**
+* **Splatfacto 世界（820,363 splat）：alpha 最大差 1/255；rgb 有 4.7% 的 splat
+  差超过 4/255，最大 25/255。** 分布是双峰的（p50=0、p99=24），说明是系统性偏移
+  而不是量化噪声。源数据 rgb 范围是 [-0.08, 4.73]，超出 SPZ 的 [-0.44, 1.44]，
+  但那些超范围的点只占大误差的 0.1%——所以**根因还没查清**。
+
+结论按实际强度写：SHARP 路径可以说「已验证一致」，Splatfacto 路径不能。两者的
+`full_res.ply` 都还在盘上，B 节那条退路对它同样有效。
+
+### E. 验证
+
+`encodeSpz` / `writeSpzLevels` 的单元测试用合成 PLY 跑，不依赖任何素材；
+钉住的是本项目自己那部分——哪些文件该活下来。`/api/worlds` 实测 8 个世界
+全部解析到 `.spz`，`npm run build` 通过。
+
+---
+
+## 3.23 🧹 显存：README 写着的那个功能其实不存在（2026-08-19）
+
+### A. 问题
+
+`backend/README.md` 写着「每次推理完成后，临时卸载模型权重并调用
+`torch.cuda.empty_cache()` 立即释放显存」。前半句是假的。
+
+`clear_vram()` 只调 `gc.collect()` + `empty_cache()` + `ipc_collect()`。这三个
+归还的是 PyTorch 分配器**缓存**的块，**碰不到仍被全局变量引用的权重**。而
+`sam_generator`、`sam2_image_predictor`、`sam3_model`、`sam3_processor`、
+`tsr_model`、`sfx_pipeline`、`lama_model`、`sharp_predictor` 这 8 个全都是
+lazy-load 的模块全局，加载后永不置空。
+
+进程内无害——`run_heavy` 已经把它们串行化了。跨进程就要命：`ns-train`
+（视频重建）跑在自己的子进程里，看不到也用不了 FastAPI 进程占着的那几 GB。
+所以「先用图片生成一个世界，再跑视频重建」在 16 GB 卡上必 OOM。
+
+### B. 方案
+
+`MODEL_GLOBALS` 登记这 8 个名字，`unload_models()` 全部置空再清缓存，
+`POST /api/unload` 走 `run_heavy` 排在正在跑的推理后面。
+
+`reconstruction_jobs.py` 里加一个 `release_gpu_models` 钩子，由 `server.py`
+在导入时接上（反向 import 会成环）。调用点在 `subprocess.Popen` 之前、
+`GPU_JOB_LOCK` **之内**——那是唯一确定没有推理在跑的时刻。锁是不可重入的
+`threading.Lock`，所以这里直接调 `unload_models()`，不能走 `run_heavy`。
+
+### C. 实测（RTX 5060 Ti 16 GB）
+
+```
+before load: free 15.91 / 17.10 GB
+after SHARP: free 13.09 GB, loaded=['sharp_predictor']
+after unload: free 15.91 GB, released=['sharp_predictor']
+reclaimed 2816 MB
+```
+
+2816 MB 一分不差地还给了驱动。
+
+### D. 真正的风险不是卸载会坏，是有人忘了登记
+
+`unload_models()` 只能释放 `MODEL_GLOBALS` 列出来的东西。所以测试不测卸载本身，
+测的是**覆盖率**：用 `ast` 解析 `server.py`，找出所有「函数里 `global X` 且赋值 X」
+的名字——也就是 lazy-load 的形状——断言它们都在 `MODEL_GLOBALS` 里。
+反向也测：登记表里不能有 `server.py` 已经不再定义的名字。
+
+用 `ast` 而不是 import，所以这个测试不需要 torch、CUDA 或任何权重，能进 CI。
+
+另有一个行为测试：monkeypatch 掉 `subprocess.Popen`，断言 `release_gpu_models`
+在它**之前**被调用——顺序反了就等于没做。
+
+---
+
+## 3.24 ⚙️ CI：检查一直都在，只是没人跑（2026-08-19）
+
+`npm run check` 和 9 个 pytest 文件早就存在，但没有 `.github/`，全靠手动。
+
+新增 `.github/workflows/ci.yml`，两个 job：
+
+* **web**：`npm ci` → lint → typecheck → test → build。build 放最后，因为它最慢，
+  而前三项定位失败远比打包报错清楚。
+* **backend**：不装 `backend/requirements.txt`——那会拉 torch、diffusers 和整套
+  SAM/TripoSR，好几 GB 的 wheel 换来 runner 根本跑不了的模型。只装
+  `pytest numpy scipy scikit-image trimesh fastapi`，跑 6 个纯 CPU 套件（89 项）。
+
+**没跑的三个在 workflow 里写明了原因**，不做无声截断：
+`test_backend.py` 是环境冒烟脚本不是测试且 import torch；`test_client.py` 要连
+localhost:8000 的活服务；`test_multiview.py` 经 `multiview_splat` 间接 import torch。
+
+同时补了 5 个此前零测试的几何模块——`worldTransform`、`walkableMap`、`spawn`、
+`placements`、`dropTargets`。选它们是因为坐标约定是这个项目历史上反复出微妙错误的
+地方（§3.8、§3.17、§3.20 都是这类），而这类错误不会崩，只会让碰撞体和 splat 悄悄错位。
+
+测试钉的是约定本身，不是算术：SHARP 的 `flipY` 转 π、Nerfstudio 显式传 -π/2 且
+必须压过 `flipY`（包括显式传 0 的情况）、`groundPlaneOffset` 在缩放**之后**加所以
+不能被 metric scale 乘一遍、spawn point 是 `[x, z]` 而非 `[x, y]`、`walkableMap`
+的超时必须与调用方 signal **合并**而非被替换（§3.21 修过一次的回归）。
+
+前端测试从 62 项增至 111 项。
+
+---
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：
