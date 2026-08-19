@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createBinaryPlyLod } from '../../../../utils/plyLod'
 import { isAppRequest } from '../../../../utils/sameOrigin'
 import { buildWalkableMap } from '../../../../utils/walkableMap'
+import { writeSpzLevels, type SplatLevelFile } from '../../../../utils/spz'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 900
@@ -211,14 +212,20 @@ export async function POST(request: NextRequest) {
       fs.copyFileSync(outputPly, path.join(worldOutDir, '0-world-full_res.ply'))
 
       const fullPly = fs.readFileSync(outputPly)
+      const splatLevels: SplatLevelFile[] = [{ level: 'full_res', ply: fullPly }]
       for (const [label, count] of PLY_LOD_TARGETS) {
         const lod = createBinaryPlyLod(fullPly, count)
         if (lod && lod.length < fullPly.length) {
           fs.writeFileSync(path.join(worldOutDir, `0-world-${label}.ply`), lod)
+          splatLevels.push({ level: label, ply: lod })
         }
       }
 
       const rawGroundPlaneOffset = await buildCollider(worldOutDir) ?? 0
+      // After the collider, which is the last reader of `0-world-500k.ply`.
+      // Splatfacto output compresses roughly tenfold: it carries spherical
+      // harmonics and three unread normals per splat that SPZ quantises away.
+      await writeSpzLevels(worldOutDir, 0, splatLevels)
       const initialPosition = job.initial_view?.position
       const hasInitialPosition = Array.isArray(initialPosition)
         && initialPosition.length === 3

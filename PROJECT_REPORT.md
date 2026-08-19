@@ -951,12 +951,752 @@ splat 端把这些 gaussian 的 opacity 置零。这是数天的工作量，且�
 
 ---
 
+## 3.22 📦 交付体积：本地世界一直在发未压缩的点云（2026-08-19）
+
+### A. 问题
+
+Marble 的世界是 `.spz`，本地生成的世界是 `.ply`——同一个 viewer，两种体积。
+
+`public/worlds/room1-cbti0t/output/world/0-world-100k.ply` 是 5,600,753 字节，
+除以 100k splat 正好 **56 B/splat**，即 14 个 float32（xyz + f_dc×3 + opacity +
+scale×3 + rot×4），一个都没量化。Marble 同档位的 `.spz` 是 1.12 MB。
+
+High 画质走 `full_res`，于是首屏要下 47–203 MB。磁盘上 902 MB 的世界里，
+784 MB 是可压缩的 PLY。
+
+### B. 方案
+
+Spark 自己就带编码器：`@sparkjsdev/spark` 导出 `transcodeSpz`，`SplatMesh`
+两种格式都能读。所以这不是换格式，只是换字节数——viewer 侧一行没改。
+
+新增 `src/utils/spz.ts`，接在两条管线生成 LOD 的同一处
+（`api/generate/route.ts`、`api/video-reconstruction/finalize/route.ts`），
+另有 `npm run assets:spz` 回填已有世界。
+
+**`full_res.ply` 保留，LOD 的 PLY 删掉。** 前者是无损原件，`/api/extract-prop`
+在运行时从它身上抠道具，`npm run assets:lod` 也从它重建 LOD；后者在 `.spz`
+写出之后就没有任何读者了——碰撞体是在同一趟管线里、更早的时候读 `500k.ply` 的。
+
+`worldsScanner` 原本用「目录列举里最后一个」决定同一档位取 `.ply` 还是 `.spz`，
+两者并存时结果不确定。改成显式优先 `.spz`。这顺带给了一条退路：删掉某个世界的
+`.spz`，扫描器自动退回它的 `.ply`。
+
+### C. 实测
+
+回填 20 个文件，**784 MB PLY → 138 MB SPZ**：
+
+| 世界 | full_res PLY | full_res SPZ | 比例 |
+|---|---|---|---|
+| singleview-meetingroom | 47.4 MB | 11.6 MB | 4.1x |
+| multiview-meetingroom | 56.8 MB | 15.4 MB | 3.7x |
+| room1-cbti0t | 66.1 MB | 16.0 MB | 4.1x |
+| family-splatfacto-integration | 203.5 MB | 18.8 MB | **10.8x** |
+
+Splatfacto 那个是 10.8x，因为它的 PLY 每个 splat 存了 45 个 float32 的球谐系数
+和 3 个从来没人读的法线。**球谐没有被丢掉**——回读确认 `shDegree=3` 完整保留。
+
+### D. 一次测错，以及测对之后的结论
+
+只看头 5 个 splat 什么也证明不了，所以做了全量比对：把两边都过一遍 Spark 自己的
+`setPackedSplat`——也就是真正送进 GPU 的那 4 个 uint32——逐字比较。
+
+**第一次做错了。** 我把词 3 当成 rgba，据此得出「Splatfacto 世界 4.7% 的 splat
+颜色偏差最大 25/255」。词 3 根本不是颜色：把其余字段全部固定、只动 rgb，词 3 纹丝不动
+（恒为 `ff000000`）。**rgba 在词 0**——`cc998066` 正好对应 opacity 0.8 / b 0.6 /
+g 0.5 / r 0.4。
+
+排查过程里还顺手证伪了一个假设：怀疑是球谐导致的，于是用 `maxSh: 0` 重编一遍完全丢掉
+SH——偏差数字一模一样（4.662%，max 25/255）。这本该是「读错字段」的信号，当时没读出来。
+
+读对词 0 之后，两条管线的结论一致：
+
+| | rgb 每通道 | alpha | 位置 |
+|---|---|---|---|
+| room1（SHARP，1,179,648 splat） | 最大 1/255，>1 的占 0.000% | 最大 1/255 | 最大 1.22e-4 |
+| family（Splatfacto，820,363 splat） | 最大 1/255，>1 的占 0.000% | 最大 0/255 | 最大 1.22e-4 |
+
+**两条管线都是等价的**，位置误差 0.12 mm。
+
+几何字有 74% 的 splat 不逐位相同，但那是量化本身，不是精度问题——逐字节比多字节字段
+本来就没意义（16 位定点数低位 +1，低字节就从 255 翻到 0）。几何该看字段级：位置
+1.22e-4；log-scale 在 room1 最大 1.23e-2，在 family 有 25 个 splat（0.003%）超过 0.05。
+
+教训写在这里而不是删掉：**逐字比较打包缓冲区之前，先确认哪个字装的是什么**——
+拿一个 splat，固定其余字段只动一个，看哪个字变。十行代码，省掉一个错误结论。
+
+### E. 验证
+
+| 项目 | 结果 |
+| :--- | :--- |
+| 地板检测行为未变 | `ground_plane_offset = +1.299`，与重构前逐位一致 |
+| 面数守恒 | 60,000 = 各类之和，无丢失、无重复归类 |
+| GLB 节点名 | `floor` / `elevated` / `ramp` / `wall` / `ceiling` |
+| 端到端契约 | three `GLTFLoader` 解析真实后端 GLB，5 类全部提取成功 |
+| 后端测试 | `backend/test_collider.py` 8 项通过 |
+| 前端测试 | 25 → **36** 项通过 |
+| 体积代价 | GLB 1.00 → 1.44 MB（边界顶点复制） |
+
+**尚未验证**：实际行走手感（贴墙是否真的不再卡顿）。in-app 浏览器面板隐藏时
+`document.hidden = true`，R3F 不渲染、资产不加载，这一项需要人工在真实浏览器里走一遍。
+
+**旧世界需要重跑 collider 才能用上分类**，否则前端检测到单个 `geometry_0` 节点后
+退回原有的整体碰撞路径（行为与改动前完全一致）。
+
+---
+
+## 3.15 🪑 可推动道具：一个被实测否掉的前提（2026-08-12）
+
+### A. 原设想与它的问题
+
+设想是"一把椅子自成一个连通分量"，而 `build_collider.py:154` 已经 `mesh.split()`
+分出了分量，只是又 `concatenate` 合了回去——看起来只要保留分量身份即可。
+
+**三个世界的实测否掉了这个前提**：
+
+| 世界 | 最大分量占比 | 尺寸 |
+| :--- | ---: | :--- |
+| sunlit-office | **97.1%** | 6.95×2.70×10.60 m（= 整个房间） |
+| multiview-meetingroom | **90.3%** | 14.65×4.65×16.95 m |
+| bounded | **98.3%** | 6.70×2.55×10.20 m |
+
+站在地板上的东西在 0.05 m 体素分辨率下与地板**焊死**。剩下的小分量里尺寸像家具的
+只有 2–3 个，其余是 Y 向厚度 0.05–0.15 m 的浮空碎片——做成 dynamic 刚体只会让场景
+里飘着一堆会掉落的垃圾，比现状更糟。
+
+### B. 改走的路
+
+分割必须来自几何之外。两条选区路径，因为**任何一条单独都不够**：
+
+- **SAM 2 点提示**：用户点一下，SAM 给出精确边界。自动，但会选错东西。
+- **手动 box**：用户拖一个框。精确表达意图，也是 SAM 选错时的兜底。
+
+两条都归结为"一组 gaussian 索引"，之后共用同一套 `体素 → marching cubes → 凸包`。
+几何自始至终来自世界自己的重建，这是与 2026-08-01 砍掉的 TripoSR 路线的本质区别。
+
+### C. 深度门控：两个都被测试钉住的坑
+
+mask 覆盖的是**整条视线**，椅子背后的墙落在完全相同的像素里。
+
+**1. 不能按峰高选择前景。** 墙在图像里总比物体大，gaussian 数常高一个量级。实测
+500 点的物体对 9000 点的墙，按"最高峰的 20%"作阈值**直接跳过物体、选中了墙**。
+改为切在"第一段空隙"——空隙的存在与两边体量无关。
+
+**2. 空隙宽度必须用米，不能用 bin 数。** bin 宽随选区跨度变化：同样是"3 个空 bin"，
+在跨米的场景里代表 15 cm，在单个表面上只有 6 mm——后者把一个高斯峰的尾巴切掉了。
+现在要求空隙至少 0.1 m。
+
+两个表面贴在一起时**不硬切**（保留整个选区），否则会把物体拦腰截断。
+
+### D. 验证
+
+| 项目 | 结果 |
+| :--- | :--- |
+| 后端测试 | `test_props.py` 15 项 + `test_collider.py` 8 项通过 |
+| 真实数据 | sunlit-office 切出 3 个 prop：0.95×0.66×1.65 m / 68 kg、0.46×0.71×1.05 m / 21 kg、0.4×0.56×0.55 m / 12 kg |
+| 扫描与配对 | GLB 节点名与 JSON id 完全配对，前端各建一个 dynamic 刚体 |
+| 增量合并 | 追加与同 id 替换均正确 |
+| 前端 | 36 项测试、lint、typecheck、生产构建全绿 |
+
+### E. Web 端交互（2026-08-13 补完）
+
+顶部一个 **Free an object** 开关，开启后点房间里任何东西即可切出来：
+
+```
+点击 → raycast(DROP_TARGET_LAYER) → worldToLocal → splat 空间
+     → Next 路由（读 PLY + 源图 + 现有 props GLB）→ FastAPI → 写回 → 刷新
+```
+
+**坐标交接是最容易错也最难发现的一环。** collider 空间必须与 splat 空间严格一致，
+靠的是 `WorldCollider` 与 `SplatRenderer` 施加同一组变换。两者一旦被改得不一致，
+提取**仍会返回成功**，只是悄悄从错误的位置切下几何——没有任何报错。
+`propExtractor.test.ts` 用 4 组变换（含翻转、缩放、非常规旋转）把这个不变量钉死。
+
+Next 路由只搬字节不解析 GLB（合并在 Python 侧），并对 slug 做路径遍历防护。
+
+端到端实测（后端 + dev server 全跑）：
+
+| 场景 | 结果 |
+| :--- | :--- |
+| box 提取 | HTTP 200，2347 gaussians → 21.43 kg，与独立生成的 21.199 kg 一致（可复现） |
+| 增量写回 | `prop-0/1/2` → 追加 `prop-3`，GLB 与 JSON 同步 |
+| `slug=../../etc` | **404**，路径遍历被挡 |
+| 同时给 point 和 box / 都不给 / 坐标非法 | 400 |
+
+**尚未验证**：实际推动手感与点选命中率（同 §3.14，浏览器面板隐藏时
+`document.hidden = true`，R3F 不渲染、资产不加载）。SAM 2 的 `point` 路径也只验证了
+代码路径，未在真实点击下检验分割质量。
+
+**未安装的依赖**：SAM 3（文本提示分割）、coacd / vhacdx（凸分解）。当前用 SAM 2
+点提示 + 单凸包已足够；装上后可分别支持文本提示与凹形道具。
+
+---
+
+## 3.16 🎛️ Viewer UI 一轮（2026-08-13）
+
+### A. 先核查，再动手——三项"缺口"其实不缺
+
+动手前逐项核对了现状，原以为缺的东西大半已经存在：
+
+| 原判断 | 实际情况 |
+| :--- | :--- |
+| 触控摇杆无可视化 | **已有**。`TouchControls.tsx` 会画出摇杆底盘与拨杆 |
+| 首屏加载无进度 | **已有**。`ViewerLoadingOverlay` + `AssetStreamIndicator`，含进度条与文件名 |
+| 画质切换只在快捷键 | **已在侧栏**（`WorldSidebar.tsx:522`），只是不在主 UI |
+
+真正缺的只有两项，也就是这一轮做的两项。
+
+### B. 上手提示（`ControlsHint`）
+
+全仓库 grep 不到任何 `WASD` / hint / onboarding 字样——**第一次进入世界时，屏幕上
+没有任何东西说明怎么走**。手机上尤其糟：摇杆是在你已经猜到"拖左半屏"之后才画出来的，
+提示本身要靠猜。
+
+现在世界就绪后显示一次，按 `(pointer: coarse)` 区分触屏与桌面给不同内容，9 秒后或
+用户首次按键/点击即消失，`localStorage` 记住。存储被禁用时选择"照常显示、只是不记住"，
+而不是抛错。
+
+### C. 截图（`Screenshot.tsx`）
+
+一个不显然的技术点：canvas 创建时**没有** `preserveDrawingBuffer`，所以在普通帧之后
+读 `toDataURL` 只会得到**空白图**——绘制缓冲在呈现后即被清空。解法是在同一个同步块里
+`gl.render()` 后立即读取，这样既拿得到像素，又不必为一个本就 GPU 吃紧的 splat 场景
+在每一帧上支付那个标志的代价。
+
+按钮放右上角而非塞进右下的源图面板：后者是 `hidden md:block` 的桌面专属，而截图恰恰
+是手机最想要的。
+
+### D. 验证状态
+
+lint / typecheck / 45 项测试 / 生产构建全绿。
+
+**但这一轮的 UI 一个都没有在真实浏览器里看过。** 它们全部挂在"世界就绪"之后，而
+in-app 浏览器面板隐藏时 `document.hidden = true`、canvas 拿不到尺寸，页面连布局都
+不发生，`viewerLoadState` 永远到不了 `ready`。实测确认 `kbd` 元素、截图按钮、
+Free an object 按钮在该环境下均不出现——这是环境限制而非代码缺陷，但**外观、位置与
+时机都需要人工过目**。
+
+---
+
+## 3.17 🗺️ 可行走区域：第一次把"走进虚空"量化（2026-08-13）
+
+### A. 三道过滤，第三道才是重点
+
+碰撞网格看起来是实心的地方，未必站得上去，更未必走得到。现在按三道过滤生成
+`<n>-world-walkable.png`：能站（分类为 `floor`/`elevated`）、站得直（头顶 ≥ 1.6 m）、
+**走得到**（从出生点洪水填充）。
+
+第三道是这个功能存在的理由。单视角重建留下大量够得着却走不到的碎片，把它们画成可走
+区域，等于**在最该警告"前面是虚空"的地方给出一张骗人的地图**。
+
+| 世界 | 能站 | 走得到 | 不可达 |
+| :--- | ---: | ---: | ---: |
+| sunlit-office | 21.9 m² | 19.8 m² | 9.6% |
+| **multiview-meetingroom** | 75.3 m² | 25.5 m² | **66.2%** |
+| bounded | 21.3 m² | 20.1 m² | 5.7% |
+
+多视图那个 66.2% 不是 bug——覆盖更广的同时也更碎。§3.9/§3.12 反复提到的"走进虚空"，
+到这里第一次有了可量化的数字。
+
+### B. 两个踩过的坑
+
+**1. 不能用 `triangles_center` 网格化。** 一个三角形只落一个格子，而 quadric
+decimation 恰恰把最平坦的区域留成少量大三角形——§3.14 的诊断数据早就写着"最平的 4%
+面片承载 38% 面积"。地板是最平的，于是地板几乎整个被漏掉，端到端实测直接得出
+**0 m²**。改为按面积采样（每格约 4 个采样点）。
+
+这个坑值得记：**面片统计的口径问题在这个项目里已经出现两次**，§3.14 是按面数报告
+占比、这里是按面片中心网格化，两次都被"平坦=大三角形"咬到。
+
+**2. 可达面积不可能大于可站面积。** despeckle 用的 `binary_closing` 会填洞并向外
+扩张，实测报出 **−13.8% 不可达**这种自相矛盾的数字。closing 仍需保留（让洪水填充跨过
+噪声孔洞），但最终结果必须与原始网格取交集——洞不是能站的地方。
+
+### C. 前端
+
+`Minimap.tsx` 把灰度掩码重新着色：不可达处**透明**而非暗色，否则读起来像"暗一点的
+地板"而不是"没有地板"，与整个功能的意图相反。玩家位姿走 ref +
+`requestAnimationFrame`，而不是每帧 setState 重渲染整个 overlay。
+
+### D. 验证
+
+34 项后端测试 + 45 项前端测试 + lint + typecheck + 生产构建全绿；扫描器已能正确读出
+`walkable` 资产。**minimap 的实际观感未经人工确认**（原因同 §3.14/§3.16）。
+
+---
+
+## 3.18 👁️ 终于看见了：Playwright 打通视觉验证（2026-08-13）
+
+### A. 前两条路都不通，第三条通了
+
+§3.14–3.17 反复写着"未经人工确认"，因为：
+
+1. **in-app 浏览器面板**隐藏时 `document.hidden = true`，canvas 拿不到尺寸，R3F 不渲染、
+   `.ply` 不请求，页面连布局都不发生
+2. **用户的真实 Chrome** 完全访问不了 `localhost:3000`（`localhost` 与 `127.0.0.1` 均
+   返回 error page，而同一个 server 在 in-app 面板里正常）——很可能是加速器/VPN 的代理
+   把本地流量也拦了，而浏览器只能以 read tier 授权，改不了它的设置
+
+**Playwright 自带 Chromium 绕开了两者**：软件 WebGL2（SwiftShader）能真渲染，
+`document.hidden = false`，canvas 1440×900。代价是渲染 118 万 splat 太慢导致截图超时，
+切到 Low 画质（100k LOD）即可。这条路以后应作为本项目视觉验证的默认手段。
+
+### B. 抓到两个真 bug
+
+**1. minimap 被源图缩略图完全遮住。** 我在代码注释里写着"放在源图面板左边"，实际却用了
+`right-3`——两者同在右下角，而源图面板是 384×384 且在 DOM 中更靠后，把 99×144 的
+minimap 整个盖住。实测 `overlapsSource: true`，裁图里只看得到那张办公室照片。
+已移到左下角，不再依赖源图面板的尺寸。
+
+**2. 玩家标记飞出屏幕。** 实测 `top: 120.625%`、`y=903`（视口只有 900）。原因是玩家在
+可行走区域之外——而这恰恰是**单视角世界的开场常态**：相机被放在拍照位置，也就是房间
+外面。现在 clamp 到边缘并降到 45% 不透明度，读作"你在图外，往这个方向"。
+
+### C. 一个看起来像 bug、其实不是的
+
+点击"Free an object"后点屏幕正中央，**不发任何请求**。逐层排查后场景图完全正常
+（5 个 dropTarget clone 都在 `mask=4`），`hitsAllLayers` 也是 0——与图层无关。
+
+真相是几何：相机在 `[0, 1.6, -0.5]` 朝 `[0, 0, -1]`，**屏幕正中心那条射线是严格水平的**，
+与水平地板永不相交，而那个高度的正前方恰好没有碰撞面。扫一遍屏幕纵向就很清楚：
+
+| 屏幕位置（NDC y） | 命中数 | 首个 |
+| :--- | ---: | :--- |
+| +0.5（上看） | 1 | ceiling |
+| **0（正中心）** | **0** | — |
+| −0.3 | 4 | wall |
+| −0.6 | 2 | ramp |
+
+我最初的测试点恰好选中了唯一打不中的位置。点屏幕下方立刻发出了
+`POST /api/extract-prop`，整条链路是通的。
+
+但这暴露了真实的 UX 问题：**正前方水平方向经常没有碰撞几何**（§3.9 记过"8/24 方向
+没有身体高度的几何"），所以点空是常态而非异常。已补上明确反馈，不再静默失败。
+
+### D. 顺带确认为真的
+
+- 上手提示按时出现又按时消失（9 秒）。之前查不到它，是因为我等了 25 秒——逻辑没错，
+  是检查时机错了
+- props 真的渲染成 dynamic 刚体：场景图里 `prop-0/1/2` 齐备
+- minimap 掩码正确着色，26.4% 像素不透明，与 19.8 m² 可走 / 74 m² 房间投影吻合
+- 五类碰撞面各自成为独立 mesh，与 §3.14 的设计一致
+
+---
+
+## 3.19 🔒 信任边界：守卫必须放在真正占 GPU 的那一端（2026-08-14）
+
+### A. 问题：`/api/*` 从来没有任何来源校验
+
+Next 自带的跨站保护只覆盖 `/_next` 与 `/__nextjs`，**`/api/*` 不在其中**。而
+`multipart/form-data` 与 `text/plain` 都是 CORS **简单请求**——浏览器不预检直接发出，
+`Request.json()` 也不校验 Content-Type。攻击者读不到响应，但**副作用已经发生**：
+
+| 一个第三方页面能做的 | 后果 |
+| :--- | :--- |
+| `POST /api/scene-project` 发 `{"version":1,"instances":[]}` | 清空摆好的场景与标定过的 spawnPoint |
+| `POST /api/generate` / `extract-prop` | 占住 16 GB 单卡 |
+| `<img src=".../api/open-claude-terminal">` | 在宿主机上起终端（`<img>` 就够，不需要 JS） |
+
+### B. 方案：自定义头 + 后端 Origin 中间件
+
+前端每个写请求带 `x-imageworld-app: 1`。**真正起作用的是「自定义头」这件事本身**——
+跨源 fetch 一旦带自定义头就不再是简单请求，必须先过预检，而这些路由不返回任何
+`Access-Control-Allow-*`，预检失败，真实请求根本发不出去。`Sec-Fetch-Site` 只是快路径：
+它在旧浏览器、非浏览器客户端、以及 `http://192.168.x.x` 这类非安全上下文下**根本不发**，
+所以只能用来拒绝、不能用来放行——判据是「两个都要成立」而非「任一」。
+
+> ⚠️ 给任何一条路由加 CORS 响应头，或在 `next.config.ts` 加全局 `headers()`，这道锁当场失效。
+
+### C. 一个只做前端会漏掉的洞
+
+**审查发现原方案挡不住真正要挡的东西**：视频重建流程里浏览器是**直连
+`localhost:8000`** 的（`CreateWorldModal.tsx`），所以 Next 层的守卫对 FastAPI 那一侧
+毫无作用——而 GPU 恰恰在那一侧。CORS 白名单只决定能不能**读**响应，不阻止请求抵达。
+
+后端补 `reject_cross_origin_writes` 中间件：非 GET 请求若带 `Origin` 且不在白名单内，
+直接 403；**`Origin` 缺失则放行**——那是 curl、Next 服务端 fetch、pytest，而能在本机起进程
+的人本来就能直接读写 `public/worlds/`。
+
+### D. 一并收紧的四项
+
+* `uvicorn` 由 `0.0.0.0` 改为 `IMAGEWORLD_BIND_HOST`（默认 `127.0.0.1`）
+* `/docs` 与 `/openapi.json` 默认关闭（`IMAGEWORLD_DOCS=true` 打开）——端点全部无鉴权，
+  `/docs` 等于一份可调用清单
+* 上传按请求计额度（默认 1 GiB）。**注意这个上限只约束常驻内存**：Starlette 在 handler
+  被调用**之前**就已把 multipart 落盘，所以 413 是写完之后才返回的
+* 服务端门禁改读**不带前缀**的 `IMAGEWORLD_LOCAL_TOOLS`。Next 在构建期把 `NEXT_PUBLIC_*`
+  内联进**服务端** bundle，旧写法在构建机上一旦设了该变量就被烤成常量 `true`，运行时再也
+  关不掉。前缀版本降级为只控制按钮显隐（`LOCAL_TOOLS_VISIBLE`）
+
+### E. 验证
+
+| 场景 | 结果 |
+| :--- | :--- |
+| 跨站 `POST /api/scene-project`（text/plain） | **403** |
+| 跨站 `GET /api/open-world-folder?target=root` | **404**，不弹窗 |
+| 跨站 `POST :8000/api/reconstruction-jobs` | **403** |
+| 白名单来源 / 无 Origin 的服务端调用 | 正常通过 |
+| 伪造头 + `sec-fetch-site: cross-site` | **403** |
+| 超额上传 | **413** |
+
+`sameOrigin.test.ts` 6 项钉住守卫语义（含「同源但无头」「有头但 cross-site」两个方向）。
+
+### F. 顺手清掉的
+
+`.env.local` 里的 `WORLDLABS_API_KEY` **全仓库零引用**——BYOK 的 key 走浏览器
+localStorage + multipart 字段，服务端从不读环境变量。一个没有任何功能依赖的实时计费凭据
+留在工作区，只靠一行 gitignore 挡着。已删除并需吊销。同时删掉导出但零调用的
+`fetchMarbleCredits`（一处会拿 key 发外网请求的入口）。
+
+---
+
+## 3.20 📏 单位：一次差点推过头的修正（2026-08-14）
+
+### A. 问题
+
+`metric_scale_factor` 把重建单位换算成米。**8 个世界里有 5 个不等于 1**
+（demo-office 1.131、marble-office 2.098、family-splatfacto **3.659**）。而
+`build_walkable.py` 的 `CELL_SIZE = 0.15` 与 `CHARACTER_HEIGHT = 1.6`、
+`build_props.py` 的 `density = 250 kg/m³`，全部作用在**未缩放**的几何上。
+
+在 3.659 的世界上：净空门限实际要求 **5.9 m**（几乎整张图判为不可走）、
+网格 cell 实际 **0.55 m**、上报面积差 **13.4 倍**、道具质量差 **49 倍**（体积是三次方）。
+
+**目前磁盘上还没错过**——唯一有 walkable 图的世界恰好是 scale=1。这是个潜伏问题，
+但 `demo-office` 自己就是 1.131，随手跑一次就会发作。
+
+### B. 一个被真实数据否掉的方案
+
+第一版把**点云**整体缩放，让文件里每个常量都名副其实。在 3.659 的真实世界上实测：
+
+```
+distance cull: 317,840 / 621,380 points     ← 15 m 在 24 m 跨度的场景上砍掉一半
+surfaces: floor 1%                          ← 分类明显不对
+ground_plane_offset: +7.653（磁盘上是 +2.256）
+```
+
+原因：缩放点云会**连带改变 `--voxel-size` 与 `--max-distance` 的含义**，也就改变了
+碰撞网格本身。`ground_plane_offset` 在磁盘上的既定约定是**世界单位**
+（`finalize/route.ts` 拿到后自己乘 scale），推翻它会波及视频重建整条链路。
+
+**改法收窄**：碰撞体构建、地板检测、表面分类、GLB 导出**全部保持世界单位不变**；
+只有「以米为单位上报」的量才换算——walkable 网格和道具质量。
+
+### C. 落地
+
+* `build_collider.py` 新增 `read_metric_scale()`：scene.json 优先于 manifest，与 viewer 同序
+* 只给 `build_walkable_map` 传一份 `mesh.copy().apply_scale(scale)`；`spawnPoint` 本来就是
+  viewer 空间坐标，至此与网格同空间（此前是拿米制 spawn 去查未缩放的网格）
+* `<n>-world-walkable.json` 新增 `metric_scale_factor`。`Minimap` 按
+  `x * builtScale / liveScale` 定位——缺字段的旧文件按 1 回退，与原先的「除以 scale」逐位等价
+* `prop_descriptor(metric_scale=)` 只换算质量；`centre` / `bounds` 仍是世界单位（它们与 GLB
+  一起被 viewer 缩放，换算会导致重复缩放）
+* `room size` 的打印不再谎称 "m"
+
+`test_metric_scale.py` 14 项：scale 来源优先级、非法值（0 / 负 / 字符串 / NaN）不落进除法、
+质量的三次方关系、`centre`/`bounds` 不动、掩码记录 scale、净空按米判定。
+
+### D. 顺带：坐标变换的单一真源
+
+`WorldCollider` 与 `SplatRenderer` 此前各自手写同一组变换，`propExtractor.test.ts` 里还有
+**第三份拷贝**——那个自称"把两侧钉在一起"的测试，实际在测它自己（把 SplatRenderer 的
+`groundPlaneOffset` 改成负号，9 个用例照样全绿）。
+
+现在两者 **spread 同一个 `worldTransform()` 的返回值**，两个组件不可能再算出不同的数。
+测试改为 import 真实模块，删掉 4 个「对任何可逆变换恒真」的往返用例，换成钉住真正的契约：
+**`groundPlaneOffset` 不参与缩放**（`finalize/route.ts:240` 依赖这一点）。
+
+Playwright + SwiftShader 实拍确认 demo-office 位置、朝向、比例均正确，零控制台错误。
+
+---
+
+## 3.21 🔌 接线：功能存在 ≠ 用户能用到（2026-08-14）
+
+### A. minimap 此前只有跑过命令行的世界才有
+
+`build_walkable_map` 的**唯一调用点**在 `build_collider.py` 的 `main()` 里。
+`/api/splat-to-collider` 从不产出它——也就是说**浏览器里生成的每一个世界都没有 minimap**，
+只有手动跑过 CLI 的那一个有。而 `generate/route.ts` 的进度文案早就写着
+"Deriving walkable surfaces from the point cloud"，roadmap 也已经标成 `[x]`。
+
+### B. 为什么不能塞进碰撞体那一趟
+
+视频重建世界的 `metricScaleFactor` 是**从碰撞体的地板高度反推出来的**
+（`finalize/route.ts`：`calibratedScale = requestedCameraHeight / (cameraY + rawGroundPlaneOffset)`）。
+而网格的门限是米制。**在碰撞体这一趟里，网格该用的 scale 还不存在。**
+
+所以新增独立端点 `/api/walkable`，吃的是**已建好的碰撞体 GLB** 而不是点云：
+
+* 小一百倍，且**表面分类已经在文件里**（`build_collider` 就是按类写节点的），不必重新体素化
+* 可以在碰撞体之后调用——这是视频重建唯一可行的顺序
+
+`collider_groups()` 从 GLB 的具名节点重建 (mesh, 面分组)。**用真实世界验证过往返**：
+sunlit-office 的 GLB 反推后 cols/rows/cell_size 与磁盘上的**完全一致**，面积差 2%
+（`sample_surface` 是无固定种子的随机采样，本身就有这个抖动）。
+
+### C. 降级是设计的一部分
+
+老世界的碰撞体是单个 `geometry_0`，没有分类，无从知道哪些面是地板——端点返回 **422**，
+调用方记一条 warning 继续。实测 demo-office / bounded / multiview-meetingroom 三个老世界
+都走这条路。它们要 minimap 需重跑一次 collider（与 §3.14 的表面分类是同一个前提）。
+
+### D. 点选抠图会打中那块 200 m 的隐形板
+
+`GroundPlane` 有一块 200×200、`colorWrite=false` 的 plane 在 `DROP_TARGET_LAYER` 上
+（给摆放编辑器的"落到地面"用，那边有 `isSelectedObject` 过滤，`PropExtractor` 没有）。后果两条：
+
+1. 地板附近点击时两者都在 y≈0，谁更近取决于亚厘米差异；命中 plane 时局部坐标第三分量恒为 0，
+   后端 `depth > 1e-6` 判否 → 400 → 前端显示成一句看不懂的 502
+2. 这块板 200 m 见方，**任何朝下的落空点击都会命中它**，§3.18 刚补的"点空反馈"在水平线以下
+   几乎永远不触发
+
+改法是给身份而不是给层级：`dropTargets.ts` 出 `markColliderDropTarget` /
+`isColliderDropTarget`，`WorldCollider` 构造 drop-target 副本时打标，`PropExtractor` 取
+**最近的房间命中**而不是最近的任意命中。
+
+### E. 没有做的一件事，以及为什么
+
+**抠出来的 prop 仍然留在静态碰撞体和 splat 云里**，所以 dynamic 凸包与包含同一把椅子表面的
+fixed trimesh 用逐字段相同的 transform 精确重叠——生成瞬间被穿透恢复冲量弹飞，推的时候顶着
+自己的表面走，视觉上还多一块灰壳。
+
+**这个不能靠互斥 collisionGroups 止血**：房间碰撞体里含 `floor`/`elevated` 节点，互斥之后
+道具不再与地板碰撞，只剩 `GroundPlane` 那块 y≈0 平板兜着，会穿墙穿台面——比现状更糟。
+
+正确解是后端把选区索引一并交出来，`build_collider` 支持 `exclude` 并在抠完重跑一次碰撞体，
+splat 端把这些 gaussian 的 opacity 置零。这是数天的工作量，且抠一次就要重跑一次体素化，
+需要自己的进度反馈。**按审计结论，这条应回退到分支做，不以当前状态进 main。**
+
+### F. 验证
+
+79 项后端测试 + 50 项前端测试 + lint + typecheck 全绿；Playwright 实拍 demo-office 与改动前
+逐像素一致、零控制台错误。
+
+---
+
+## 3.22 📦 交付体积：本地世界一直在发未压缩的点云（2026-08-19）
+
+### A. 问题
+
+Marble 的世界是 `.spz`，本地生成的世界是 `.ply`——同一个 viewer，两种体积。
+
+`public/worlds/room1-cbti0t/output/world/0-world-100k.ply` 是 5,600,753 字节，
+除以 100k splat 正好 **56 B/splat**，即 14 个 float32（xyz + f_dc×3 + opacity +
+scale×3 + rot×4），一个都没量化。Marble 同档位的 `.spz` 是 1.12 MB。
+
+High 画质走 `full_res`，于是首屏要下 47–203 MB。磁盘上 902 MB 的世界里，
+784 MB 是可压缩的 PLY。
+
+### B. 方案
+
+Spark 自己就带编码器：`@sparkjsdev/spark` 导出 `transcodeSpz`，`SplatMesh`
+两种格式都能读。所以这不是换格式，只是换字节数——viewer 侧一行没改。
+
+新增 `src/utils/spz.ts`，接在两条管线生成 LOD 的同一处
+（`api/generate/route.ts`、`api/video-reconstruction/finalize/route.ts`），
+另有 `npm run assets:spz` 回填已有世界。
+
+**`full_res.ply` 保留，LOD 的 PLY 删掉。** 前者是无损原件，`/api/extract-prop`
+在运行时从它身上抠道具，`npm run assets:lod` 也从它重建 LOD；后者在 `.spz`
+写出之后就没有任何读者了——碰撞体是在同一趟管线里、更早的时候读 `500k.ply` 的。
+
+`worldsScanner` 原本用「目录列举里最后一个」决定同一档位取 `.ply` 还是 `.spz`，
+两者并存时结果不确定。改成显式优先 `.spz`。这顺带给了一条退路：删掉某个世界的
+`.spz`，扫描器自动退回它的 `.ply`。
+
+### C. 实测
+
+回填 20 个文件，**784 MB PLY → 138 MB SPZ**：
+
+| 世界 | full_res PLY | full_res SPZ | 比例 |
+|---|---|---|---|
+| singleview-meetingroom | 47.4 MB | 11.6 MB | 4.1x |
+| multiview-meetingroom | 56.8 MB | 15.4 MB | 3.7x |
+| room1-cbti0t | 66.1 MB | 16.0 MB | 4.1x |
+| family-splatfacto-integration | 203.5 MB | 18.8 MB | **10.8x** |
+
+Splatfacto 那个是 10.8x，因为它的 PLY 每个 splat 存了 45 个 float32 的球谐系数
+和 3 个从来没人读的法线。**球谐没有被丢掉**——回读确认 `shDegree=3` 完整保留。
+
+### D. 一个只有全量比对才会发现的差别
+
+只看头 5 个 splat，两种格式完全一致。全量比对（把两边都过一遍 Spark 自己的
+`setPackedSplat` 量化器，也就是真正送进 GPU 的那 4 个 uint32）才看出分野：
+
+* **SHARP 世界（room1，1,179,648 splat）：每个通道最大差 1/255，无一超出 SPZ
+  的表示范围。等价于逐位相同。**
+* **Splatfacto 世界（820,363 splat）：alpha 最大差 1/255；rgb 有 4.7% 的 splat
+  差超过 4/255，最大 25/255。** 分布是双峰的（p50=0、p99=24），说明是系统性偏移
+  而不是量化噪声。源数据 rgb 范围是 [-0.08, 4.73]，超出 SPZ 的 [-0.44, 1.44]，
+  但那些超范围的点只占大误差的 0.1%——所以**根因还没查清**。
+
+结论按实际强度写：SHARP 路径可以说「已验证一致」，Splatfacto 路径不能。两者的
+`full_res.ply` 都还在盘上，B 节那条退路对它同样有效。
+
+### E. 验证
+
+`encodeSpz` / `writeSpzLevels` 的单元测试用合成 PLY 跑，不依赖任何素材；
+钉住的是本项目自己那部分——哪些文件该活下来。`/api/worlds` 实测 8 个世界
+全部解析到 `.spz`，`npm run build` 通过。
+
+---
+
+## 3.23 🧹 显存：README 写着的那个功能其实不存在（2026-08-19）
+
+### A. 问题
+
+`backend/README.md` 写着「每次推理完成后，临时卸载模型权重并调用
+`torch.cuda.empty_cache()` 立即释放显存」。前半句是假的。
+
+`clear_vram()` 只调 `gc.collect()` + `empty_cache()` + `ipc_collect()`。这三个
+归还的是 PyTorch 分配器**缓存**的块，**碰不到仍被全局变量引用的权重**。而
+`sam_generator`、`sam2_image_predictor`、`sam3_model`、`sam3_processor`、
+`tsr_model`、`sfx_pipeline`、`lama_model`、`sharp_predictor` 这 8 个全都是
+lazy-load 的模块全局，加载后永不置空。
+
+进程内无害——`run_heavy` 已经把它们串行化了。跨进程就要命：`ns-train`
+（视频重建）跑在自己的子进程里，看不到也用不了 FastAPI 进程占着的那几 GB。
+所以「先用图片生成一个世界，再跑视频重建」在 16 GB 卡上必 OOM。
+
+### B. 方案
+
+`MODEL_GLOBALS` 登记这 8 个名字，`unload_models()` 全部置空再清缓存，
+`POST /api/unload` 走 `run_heavy` 排在正在跑的推理后面。
+
+`reconstruction_jobs.py` 里加一个 `release_gpu_models` 钩子，由 `server.py`
+在导入时接上（反向 import 会成环）。调用点在 `subprocess.Popen` 之前、
+`GPU_JOB_LOCK` **之内**——那是唯一确定没有推理在跑的时刻。锁是不可重入的
+`threading.Lock`，所以这里直接调 `unload_models()`，不能走 `run_heavy`。
+
+### C. 实测（RTX 5060 Ti 16 GB）
+
+```
+before load: free 15.91 / 17.10 GB
+after SHARP: free 13.09 GB, loaded=['sharp_predictor']
+after unload: free 15.91 GB, released=['sharp_predictor']
+reclaimed 2816 MB
+```
+
+2816 MB 一分不差地还给了驱动。
+
+### D. 真正的风险不是卸载会坏，是有人忘了登记
+
+`unload_models()` 只能释放 `MODEL_GLOBALS` 列出来的东西。所以测试不测卸载本身，
+测的是**覆盖率**：用 `ast` 解析 `server.py`，找出所有「函数里 `global X` 且赋值 X」
+的名字——也就是 lazy-load 的形状——断言它们都在 `MODEL_GLOBALS` 里。
+反向也测：登记表里不能有 `server.py` 已经不再定义的名字。
+
+用 `ast` 而不是 import，所以这个测试不需要 torch、CUDA 或任何权重，能进 CI。
+
+另有一个行为测试：monkeypatch 掉 `subprocess.Popen`，断言 `release_gpu_models`
+在它**之前**被调用——顺序反了就等于没做。
+
+---
+
+## 3.24 ⚙️ CI：检查一直都在，只是没人跑（2026-08-19）
+
+`npm run check` 和 9 个 pytest 文件早就存在，但没有 `.github/`，全靠手动。
+
+新增 `.github/workflows/ci.yml`，两个 job：
+
+* **web**：`npm ci` → lint → typecheck → test → build。build 放最后，因为它最慢，
+  而前三项定位失败远比打包报错清楚。
+* **backend**：不装 `backend/requirements.txt`——那会拉 torch、diffusers 和整套
+  SAM/TripoSR，好几 GB 的 wheel 换来 runner 根本跑不了的模型。只装
+  `pytest numpy scipy scikit-image trimesh fastapi`，跑 6 个纯 CPU 套件（89 项）。
+
+**没跑的三个在 workflow 里写明了原因**，不做无声截断：
+`test_backend.py` 是环境冒烟脚本不是测试且 import torch；`test_client.py` 要连
+localhost:8000 的活服务；`test_multiview.py` 经 `multiview_splat` 间接 import torch。
+
+同时补了 5 个此前零测试的几何模块——`worldTransform`、`walkableMap`、`spawn`、
+`placements`、`dropTargets`。选它们是因为坐标约定是这个项目历史上反复出微妙错误的
+地方（§3.8、§3.17、§3.20 都是这类），而这类错误不会崩，只会让碰撞体和 splat 悄悄错位。
+
+测试钉的是约定本身，不是算术：SHARP 的 `flipY` 转 π、Nerfstudio 显式传 -π/2 且
+必须压过 `flipY`（包括显式传 0 的情况）、`groundPlaneOffset` 在缩放**之后**加所以
+不能被 metric scale 乘一遍、spawn point 是 `[x, z]` 而非 `[x, y]`、`walkableMap`
+的超时必须与调用方 signal **合并**而非被替换（§3.21 修过一次的回归）。
+
+前端测试从 62 项增至 111 项。
+
+---
+
+## 3.25 ⏳ 生成不再属于那条 HTTP 连接（2026-08-19）
+
+### A. 问题
+
+`POST /api/generate` 一直是「请求拥有工作」：进度顺着这条连接流回来，
+而 `request.signal` 一旦 abort，管线就被拆掉、暂存世界被删。
+
+于是刷新一下、合上笔记本、隧道抖一下，一次跑了八分钟的 Marble 生成就没了——
+**而且钱已经花掉了**。
+
+### B. 方案
+
+`src/utils/generationJobs.ts`：POST 建一个任务、把管线**脱离自己**启动、
+立刻返回 id；进度写进文件，浏览器轮询。这正是视频那条路一直以来的形状
+（`backend/reconstruction_jobs.py`），只是这次在 Node 侧——因为图片管线在这边，
+它握着 Marble key，那个 key 不落盘也不进后端。
+
+Marble key 只活在启动闭包里；任务文件只记 `backend: 'marble' | 'sharp'`。
+有一条测试直接对 job.json 的原文断言不含 "key"。
+
+### C. 一个设计被实测打回：内存里的所有权不成立
+
+第一版用一个模块级 `Map<jobId, AbortController>` 判断「这个进程还在跑它吗」，
+不在就判 `interrupted`。单元测试全绿，实测立刻露馅：
+
+任务明明还活着（桩后端还挂着、暂存目录还在），从 `/api/generate/jobs` 读却是
+`interrupted`。**Next 给每个 route handler 单独打包，模块级状态不共享**——
+`/api/generate` 的 `Map` 不是 `/api/generate/jobs/[id]` 的 `Map`。
+
+同一个原因还有第二个后果，而且更糟：`DELETE` 那个 bundle 里根本找不到
+controller，取消只会把文件改成 canceled，**管线照跑不误**。
+
+改成两件事都走文件：
+
+* **心跳**：`trackJob` 每 2 秒写一次 `heartbeatAt`。读取方看到 `running`
+  但心跳超过 60 秒没动，才判 `interrupted`。
+* **取消**：同一个 tick 顺便回读自己的状态，发现不再是 `running` 就 abort
+  自己的 controller。所以取消跨 bundle 也能真正到达管线。
+
+60 秒相对 2 秒很宽松，是刻意的：事件循环忙一下不该被当成死亡。
+
+### D. 并发
+
+`activeJob()` 非空就返回 409，并把**正在跑的那个任务的 id** 一起给前端——
+前端据此接管它，而不是报「冲突」。这也是刷新后重新接上的同一条路径：
+modal 打开时读 `GET /api/generate/jobs` 的 `active`。
+
+一次只跑一个不是限制：GPU 本来就在后端串行，而「只有一个」正是重连能省掉
+「记住 id 跨刷新」的原因。
+
+### E. 验证（起了一个只挂不答的桩后端，让任务停住）
+
+| 检查 | 结果 |
+|---|---|
+| POST 立即返回 | 202 + running 任务 |
+| curl 退出后任务是否继续 | 继续跑 >12 s |
+| 从另一个 bundle 轮询 | 连续 4 次都是 running（心跳生效） |
+| 运行中再次 POST | 409 + 运行中任务的 id |
+| 从 DELETE bundle 取消 | 6 秒内 canceled，暂存世界被删 |
+| 重复取消 | 200，幂等 |
+| 取消后重新开始 | 202 |
+| 已发布的世界 | 8 个，未受影响 |
+
+**第一轮实测我自己也读错了一次**：判据写成 `ls .staging`，而空的父目录同样返回
+成功，于是「清理干净」被读成「有残留」。改成比对具体的 slug 目录名才是对的。
+
+---
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：
 
 ### 4.1 引入 Celery/Redis 推理队列 (性能优化 - 强烈推荐)
-目前前端 Next.js 调用 `/api/generate` 采用同步长连接机制。在高并发或 GPU 负载较满时，很容易导致网关超时（Gateway Timeout 504）。
+> **注**：§3.25 已把 `/api/generate` 改成任务制，单机场景下的「刷新即丢」和 504 都不再存在。下面这套仍然成立的部分是**多机**：任务状态现在写在本地磁盘，跨实例共享需要 Redis 或数据库。
+
+原先前端 Next.js 调用 `/api/generate` 采用同步长连接机制。在高并发或 GPU 负载较满时，很容易导致网关超时（Gateway Timeout 504）。
 * **改造方法**：
   1. 在 Next.js 或独立的 Python 后端部署 Celery 异步框架，使用 Redis 缓存队列。
   2. 用户上传图片后，生成任务立即入队，Next.js `/api/generate` 立即返回 `{"task_id": "xxx", "status": "queued"}`。

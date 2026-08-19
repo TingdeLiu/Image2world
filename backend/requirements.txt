@@ -1,5 +1,8 @@
 fastapi
 uvicorn
+# Every UploadFile/Form endpoint needs this. FastAPI only raises at import
+# time, so a missing wheel takes down the whole app, not one route.
+python-multipart
 numpy
 opencv-python
 pillow

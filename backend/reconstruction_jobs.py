@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,13 @@ try:  # package import under pytest, script import under `python backend/server.
     from .gpu_scheduler import GPU_JOB_LOCK
 except ImportError:  # pragma: no cover - exercised by the production entrypoint
     from gpu_scheduler import GPU_JOB_LOCK
+
+# Set by server.py at import time. Reconstruction runs `ns-train` in a
+# subprocess, which cannot see -- let alone reuse -- the VRAM the FastAPI
+# process is holding, so the models loaded by earlier requests have to go before
+# the training starts or a 16 GB card runs out. Left as None when this module is
+# imported on its own, as the tests do.
+release_gpu_models: Callable[[], Any] | None = None
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -325,6 +333,14 @@ class ReconstructionJobManager:
                 ]
                 if resume:
                     command.extend(["--reuse-sfm", "--resume-training"])
+
+                # The GPU lock is held here, so nothing is mid-inference: this is
+                # the one safe moment to hand the card over to the subprocess.
+                if release_gpu_models is not None:
+                    try:
+                        release_gpu_models()
+                    except Exception as error:  # pragma: no cover - best effort
+                        print(f"Could not release model weights before training: {error}")
 
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
                 environment = os.environ.copy()
