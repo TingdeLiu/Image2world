@@ -2,7 +2,8 @@ import fs from 'fs'
 import path from 'path'
 import { NextRequest, NextResponse } from 'next/server'
 import { createBinaryPlyLod } from '../../../../utils/plyLod'
-import { isAppRequest } from '../../../../utils/sameOrigin'
+import { guardRoute } from '../../../../utils/routeGuard'
+import { currentUserId } from '../../../../utils/auth'
 import { buildWalkableMap } from '../../../../utils/walkableMap'
 import { writeSpzLevels, type SplatLevelFile } from '../../../../utils/spz'
 
@@ -150,9 +151,9 @@ async function buildCollider(worldOutDir: string) {
 export async function POST(request: NextRequest) {
   // Publishes a finished reconstruction into `public/worlds`, which means
   // writing hundreds of megabytes and claiming a slug. Same-origin only.
-  if (!isAppRequest(request)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  const { denied } = await guardRoute(request)
+  if (denied) return denied
+  const owner = await currentUserId(request)
 
   let payload: { jobId?: string; name?: string }
   try {
@@ -253,6 +254,7 @@ export async function POST(request: NextRequest) {
         updated_at: now,
         reconstruction_job_id: jobId,
         notes: `Generated locally with COLMAP + Nerfstudio Splatfacto (${job.quality})`,
+        ...(owner ? { owner } : {}),
       }, null, 2))
 
       fs.writeFileSync(path.join(worldOutDir, '0-world.json'), JSON.stringify({

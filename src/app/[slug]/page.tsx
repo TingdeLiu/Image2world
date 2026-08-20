@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation'
 import { readWorlds } from '../../utils/worldsScanner'
+import { currentViewer } from '../../utils/serverSession'
 import { LoadedApp } from '../../components/LoadedApp'
 
 export const dynamic = 'force-dynamic'
@@ -10,7 +11,7 @@ interface PageProps {
 
 export default async function Page({ params }: PageProps) {
   const { slug } = await params
-  const worlds = readWorlds()
+  const worlds = readWorlds(await currentViewer())
   
   const entry = worlds.find((w) => w.slug === slug)
   if (!entry) {

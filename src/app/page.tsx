@@ -1,10 +1,11 @@
 import { readWorlds } from '../utils/worldsScanner'
+import { currentViewer } from '../utils/serverSession'
 import { HomeLanding } from '../components/HomeLanding'
 
 export const dynamic = 'force-dynamic'
 
-export default function Home() {
-  const worlds = readWorlds()
+export default async function Home() {
+  const worlds = readWorlds(await currentViewer())
   const featured = worlds[0]
   const latestWorldVersion = featured?.worldVersions[featured.worldVersions.length - 1]
 

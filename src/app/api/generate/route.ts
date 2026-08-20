@@ -3,8 +3,9 @@ import fs from 'fs'
 import path from 'path'
 import { createBinaryPlyLod } from '../../../utils/plyLod'
 import { MarbleError, generateWorldWithMarble } from './marble'
-import { isAppRequest } from '../../../utils/sameOrigin'
 import { buildWalkableMap } from '../../../utils/walkableMap'
+import { guardRoute } from '../../../utils/routeGuard'
+import { currentUserId } from '../../../utils/auth'
 import { writeSpzLevels, type SplatLevelFile } from '../../../utils/spz'
 import {
   activeJob,
@@ -178,6 +179,8 @@ interface GenerationInput {
    * logged -- it lives in the caller's browser and only passes through here.
    */
   marbleApiKey?: string
+  /** Who the finished world belongs to. See `auth.ts`. */
+  owner?: string
 }
 
 /**
@@ -285,7 +288,7 @@ async function publishWorldDir(stagedDir: string, finalDir: string) {
  * replaced it with a single-view guess, while costing most of the runtime.
  */
 async function runGeneration(
-  { file, name, marbleApiKey }: GenerationInput,
+  { file, name, marbleApiKey, owner }: GenerationInput,
   report: ProgressReporter,
   signal: AbortSignal,
 ) {
@@ -327,6 +330,7 @@ async function runGeneration(
       notes: marbleApiKey
         ? 'Generated with World Labs Marble (marble-1.1)'
         : 'Generated with the local Image2World pipeline (Apple SHARP)',
+      ...(owner ? { owner } : {}),
     }
     fs.writeFileSync(path.join(worldDir, 'project.json'), JSON.stringify(projectJson, null, 2))
 
@@ -509,9 +513,8 @@ export async function POST(request: NextRequest) {
   // A generation ties up the GPU for a minute locally, or bills a Marble key
   // for real money. `multipart/form-data` is a CORS simple request, so without
   // this check any other tab can start one.
-  if (!isAppRequest(request)) {
-    return generationErrorResponse('Forbidden', 403, 'forbidden')
-  }
+  const { denied } = await guardRoute(request)
+  if (denied) return denied
 
   let formData: FormData
   try {
@@ -565,7 +568,7 @@ export async function POST(request: NextRequest) {
   // the whole point is that the generation outlives the request that asked for
   // it. The key stays in this closure and is never written to the job file.
   void runGeneration(
-    { file, name, marbleApiKey },
+    { file, name, marbleApiKey, owner: await currentUserId(request) },
     (progress) => reportProgress(job.id, progress),
     signal,
   )

@@ -1689,6 +1689,93 @@ modal 打开时读 `GET /api/generate/jobs` 的 `active`。
 
 ---
 
+## 3.26 🔐 身份：同源校验从来就不是认证（2026-08-20）
+
+### A. 问题
+
+`isAppRequest` 装在 8 个路由上，注释写得很清楚它在防什么——**CSRF**。它拦的是
+「别的网站在你浏览器里驱动这个 API」。
+
+它拦不住的是：**有人直接 curl 这台机器**。加一个 `x-imageworld-app: 1` 头就过了。
+
+所以在这次改动之前，这个 app 的访问控制总量是零：任何能连到那个端口的人都能占用
+GPU、花掉 Marble key、往 `public/worlds` 里写东西。
+
+### B. 只守 API 等于没守
+
+一开始我只给 `/api/*` 加了身份校验。这是安全剧场：
+
+* 页面是 server component，自己就从磁盘读世界数据渲染出来；
+* splat 本身在 `public/worlds/`，Next 当**静态文件**发——知道 slug 就能直接下，
+  一个受守卫的路由都不碰。
+
+所以真正的位置是 `middleware.ts`，一处同时管住页面和静态资源。API 反而要**排除**
+在外：它们答的是 JSON，重定向到 HTML 登录页会把 401 变成解析错误。
+
+### C. 一个把实现方式定死的约束
+
+middleware 默认跑 Edge runtime，那里**没有 `node:crypto`，也没有 `Buffer`**。
+
+所以 `auth.ts` 整个写在 **Web Crypto** 上（`crypto.subtle`），Node 18+ 和 Edge 都有，
+一套实现两处用，代价是 `verifySession` 变成异步——`guardRoute` 也跟着异步。
+这个代价是划算的：两套实现迟早会漂移，而漂移的方向是「middleware 放行了路由会拒绝的东西」。
+
+`serverSession.ts` 单独存在也是同一个原因：它用 `next/headers`，那个在 Edge 里
+不能用，所以只给 server component 用，验证逻辑仍然共享。
+
+### D. 默认关闭，且必须两个变量一起给
+
+不配置 = 完全是以前的行为，本地开发不受影响。
+
+**只给一个不算配置**，这是刻意的：只有 secret 没有密码，操作者会把自己锁在门外；
+只有密码没有 secret，签出来的 cookie 没人能验。两种半配置状态都不值得支持。
+
+变量名不带 `NEXT_PUBLIC_` 前缀，理由和 `localTools.ts` 一样——`NEXT_PUBLIC_*` 在构建期
+被内联，一个读它的门禁会被构建机器的环境**烤成常开**。
+
+### E. 归属
+
+`project.json` 记 `owner`，生成时写入，`readWorlds(viewer)` 按它过滤。
+
+**没有 owner 的世界是共享而非隐藏**——它们是开启鉴权之前生成的，藏起来等于操作者
+一开门就发现自己的世界全没了。这是决定，不是疏忽，所以有测试钉住。
+
+未开启鉴权时 `currentUserId` 返回 `operator`，和密码签出来的身份是同一个，
+于是「开门前生成的世界」在开门后不会变成孤儿。
+
+### F. 验证
+
+关闭状态（默认）：
+
+| 检查 | 结果 |
+|---|---|
+| `/`、`/room1-cbti0t` | 200 |
+| 世界资源 `.spz` | 200 |
+| `/api/worlds` | 200，8 个世界 |
+| 跨源 `/api/worlds` | 403（原有守卫仍在） |
+
+开启后、未登录：
+
+| 检查 | 结果 |
+|---|---|
+| `/` | 307 → `/sign-in` |
+| `/room1-cbti0t` | 307 → `/sign-in?next=%2Froom1-cbti0t` |
+| 世界资源 `.spz` | **401**（不是重定向——WebGL loader 拿到 HTML 只会报解码错误） |
+| `/api/worlds`、`POST /api/generate` | 401 `unauthenticated` |
+| 错误密码 | 401；第 9 次起 429 |
+
+登录后：页面 200、`.spz` 完整下回 1,480,143 字节、`/api/worlds` 8 个世界。
+**带着有效 cookie 但不带 app 头访问 API 仍是 403**——两道检查确实互相独立。
+登出后 `/` 立刻回到 307。
+
+### G. 一个不属于本项目的发现
+
+`AGENTS.md` 要求「写代码前先读 `node_modules/next/dist/docs/` 里的对应指南」。
+**这个目录在当前安装里不存在**（Next 15.5.19）。所以 middleware 的行为我是靠实测
+确认的，不是靠文档。这条值得单独说，因为下一个人会按 AGENTS.md 去找那个目录。
+
+---
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：
@@ -1704,6 +1791,10 @@ modal 打开时读 `GET /api/generate/jobs` 的 `active`。
   4. 后端 GPU 推理进程作为 Worker 顺序处理任务，处理完毕后将资产上传至 CDN，并通知前端。
 
 ### 4.2 接入 Clerk 鉴权与 Stripe 计费包 (商业变现)
+> **注**：§3.26 已经把鉴权**边界**做好了——middleware 守页面与静态资源、`guardRoute`
+> 守全部 API、世界记 `owner`。现在缺的只是「一个操作者密码」换成「多用户身份源」：
+> 换掉 `auth.ts` 与 `SignInForm.tsx` 两个文件，其余调用点一处不动。
+
 * **用户认证**：在 Next.js 中集成 Clerk 或 NextAuth.js，为页面添加鉴权守卫。
 * **点数消费 (Credits)**：
   1. 在数据库（PostgreSQL）中为用户关联 `credits` 字段；

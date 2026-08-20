@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { openFolder } from '../../../utils/worldsScanner'
 import { LOCAL_TOOLS_ENABLED } from '../../../utils/localTools'
-import { isAppRequest } from '../../../utils/sameOrigin'
+import { guardRoute } from '../../../utils/routeGuard'
 
 export const dynamic = 'force-dynamic'
 
@@ -19,7 +19,10 @@ export async function GET(request: NextRequest) {
   // In development the tools are on by design, which leaves the route open to
   // any other tab the user has -- so the caller must also prove it is this app.
   // Both checks run before `target=root`, which would otherwise return early.
-  if (!LOCAL_TOOLS_ENABLED || !isAppRequest(request)) {
+  // Still a 404 rather than a 403: these routes spawn processes on the host,
+  // and confirming they exist to someone who cannot use them is free
+  // reconnaissance.
+  if (!LOCAL_TOOLS_ENABLED || (await guardRoute(request)).denied) {
     return new NextResponse('Not found', { status: 404 })
   }
 
