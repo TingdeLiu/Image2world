@@ -559,8 +559,14 @@ def build_stage(
         ground = UsdGeom.Plane.Define(stage, "/World/GroundPlane")
         ground.CreateAxisAttr(UsdGeom.Tokens.y)
         ground.CreatePurposeAttr(UsdGeom.Tokens.guide)
-        ground_xform = UsdGeom.Xformable(ground.GetPrim())
-        ground_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, world.ground_plane_offset, 0.0))
+        # The plane sits at the origin, with no offset. `groundPlaneOffset` is
+        # what lifts the *background* so its floor lands on y=0 -- applying it
+        # here as well would raise the plane by that much again, and the floor
+        # is already there. `GroundPlane.tsx` takes no position for the same
+        # reason; only `SplatRenderer.tsx` and `WorldCollider.tsx` use the
+        # offset. Getting this wrong is invisible in the viewer but not in a
+        # simulator: a robot spawned at the origin rests on an invisible plane
+        # a metre above the floor, and so does anything dropped into the scene.
         UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
 
     # --- sun --------------------------------------------------------------

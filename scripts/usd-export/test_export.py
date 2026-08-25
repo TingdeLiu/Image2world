@@ -310,10 +310,23 @@ def test_z_up_moves_height_to_z(z_up_stage):
 
 
 @needs_world
-def test_ground_plane_follows_offset(y_up_stage):
-    from pxr import UsdGeom, UsdPhysics
+def test_ground_plane_sits_at_the_origin(y_up_stage):
+    """The plane must coincide with the floor, which the background already puts at 0.
+
+    It used to carry `groundPlaneOffset` as well, which raised it a metre above
+    the floor. Harmless in the viewer, which never uses it for anything the eye
+    can see; in Isaac Sim every rigid body landed on it instead of on the room.
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
 
     ground = y_up_stage.GetPrimAtPath("/World/GroundPlane")
     assert ground.IsValid()
     assert ground.HasAPI(UsdPhysics.CollisionAPI)
     assert UsdGeom.Plane(ground).GetAxisAttr().Get() == UsdGeom.Tokens.y
+
+    height = (
+        UsdGeom.Xformable(ground)
+        .ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        .ExtractTranslation()[1]
+    )
+    assert abs(height) < 1e-6, f"ground plane sits at {height:.3f} m, not on the floor"
