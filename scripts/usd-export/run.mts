@@ -19,6 +19,19 @@ const interpreter =
 
 const args = process.argv.slice(2)
 
+// spz_to_ply.py needs the same interpreter as the exporter -- both want
+// usd-convert-gsplat, which the conda env cannot host (see README.md).
+if (args[0] === '--spz-to-ply') {
+  const converter = path.join(scriptDirectory, 'spz_to_ply.py')
+  const run = spawnSync(interpreter, [converter, ...args.slice(1)], { stdio: 'inherit' })
+  if (run.error) {
+    console.error(`Failed to run ${interpreter}: ${run.error.message}`)
+    console.error('See scripts/usd-export/README.md for environment setup.')
+    process.exit(1)
+  }
+  process.exit(run.status ?? 1)
+}
+
 if (args[0] === '--pytest') {
   const test = spawnSync(interpreter, ['-m', 'pytest', scriptDirectory, '-q', ...args.slice(1)], {
     stdio: 'inherit',

@@ -11,6 +11,7 @@
     "assets:lod": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/generate-ply-lods.mts",
     "assets:spz": "node --max-old-space-size=8192 --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/ply-to-spz.mts",
     "export:usd": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/usd-export/run.mts",
+    "assets:ply": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/usd-export/run.mts --spz-to-ply",
     "test:usd": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/usd-export/run.mts --pytest",
     "test": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --disable-warning=ExperimentalWarning --test \"src/**/*.test.ts\"",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build"
