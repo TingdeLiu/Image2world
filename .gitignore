@@ -87,3 +87,4 @@ __pycache__/
 # generative world is reversible. For a tracked world that copy is redundant --
 # the previous version is already in the history.
 *.glb.orig
+scripts/isaac-sim/imageworld.omap.generated.kit
