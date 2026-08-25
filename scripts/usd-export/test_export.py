@@ -74,50 +74,71 @@ def assert_contains(source: str, pattern: str, what: str, owner: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_splat_transform_contract():
-    """build_stage() authors translate(offset) . rotateX(180) . scale(factor)."""
-    source = read_source("modules/splat/SplatRenderer.tsx")
+def test_placement_contract():
+    """`worldTransform()` is the placement, and `build_stage()` mirrors it.
+
+    This used to grep the two components for the arithmetic written inline in
+    each. The arithmetic moved into one shared helper, both greps stopped
+    matching, and the drift these tests exist to catch happened underneath
+    them: the TypeScript grew a `rotationX` override for Z-up Nerfstudio worlds
+    and the exporter kept reading only `flip_y`. Watch the single source
+    instead.
+    """
+    source = read_source("modules/collider/worldTransform.ts")
     assert_contains(
         source,
-        r"position=\{\[0,\s*groundPlaneOffset,\s*0\]\}",
-        "Splat ground offset",
-        "SplatRenderer.tsx",
+        r"rotation: \[rotationX \?\? \(flipY \? Math\.PI : 0\), 0, 0\]",
+        "Background rotation (X axis; explicit rotationX wins over flipY)",
+        "worldTransform.ts",
     )
     assert_contains(
         source,
-        r"rotation=\{\[flipY\s*\?\s*Math\.PI\s*:\s*0,\s*0,\s*0\]\}",
-        "Splat flip-Y rotation (X axis, 180 degrees)",
-        "SplatRenderer.tsx",
+        r"position: \[0, groundPlaneOffset \?\? 0, 0\]",
+        "Background ground offset",
+        "worldTransform.ts",
     )
     assert_contains(
         source,
-        r"scale=\{metricScaleFactor\}",
-        "Splat metric scale",
-        "SplatRenderer.tsx",
+        r"const scale = metricScaleFactor \?\? 1",
+        "Background metric scale default",
+        "worldTransform.ts",
+    )
+    assert_contains(
+        source,
+        r"scale: \[scale, scale, scale\]",
+        "Background metric scale, uniform on all three axes",
+        "worldTransform.ts",
     )
 
 
-def test_collider_shares_the_splat_transform():
-    """The exported Collider sits under the same /World/Background Xform."""
-    source = read_source("modules/collider/WorldCollider.tsx")
-    assert_contains(
-        source,
-        r"const normalizedRotation = flipY \? Math\.PI : 0",
-        "Collider flip-Y rotation",
-        "WorldCollider.tsx",
-    )
-    assert_contains(
-        source,
-        r"rotation=\{\[normalizedRotation,\s*0,\s*0\]\}",
-        "Collider rotation axis",
-        "WorldCollider.tsx",
-    )
-    assert_contains(
-        source,
-        r"position=\{\[0,\s*normalizedGroundPlaneOffset,\s*0\]\}",
-        "Collider ground offset",
-        "WorldCollider.tsx",
-    )
+def test_both_renderers_use_the_shared_transform():
+    """Neither component may go back to computing the placement itself.
+
+    The exporter mirrors one function. If a component stops calling it, the
+    exporter is mirroring something that no longer governs what the viewer
+    draws -- and the splat and the collider can drift apart from each other
+    too, which is silent: walking still works, the collider is just somewhere
+    the splat is not.
+    """
+    for relative in ("modules/splat/SplatRenderer.tsx", "modules/collider/WorldCollider.tsx"):
+        assert_contains(
+            read_source(relative),
+            r"worldTransform\(\{",
+            "Shared placement helper",
+            relative,
+        )
+
+
+def test_background_rotation_mirrors_the_typescript():
+    """The exporter's half of the contract above, exercised directly."""
+    assert exporter.background_rotation_degrees(True, None) == 180.0
+    assert exporter.background_rotation_degrees(False, None) == 0.0
+    # Nerfstudio: Z-up, arrives as flip_y=False with rotation_x=-pi/2.
+    assert exporter.background_rotation_degrees(False, -math.pi / 2) == pytest.approx(-90.0)
+    # An explicit rotation wins even when flip_y would say otherwise ...
+    assert exporter.background_rotation_degrees(True, -math.pi / 2) == pytest.approx(-90.0)
+    # ... including an explicit zero, which `??` keeps and a truth test loses.
+    assert exporter.background_rotation_degrees(True, 0.0) == 0.0
 
 
 def test_sun_direction_contract():

@@ -37,6 +37,25 @@ SPLAT_EXTENSIONS = (".ply", ".spz")
 DEFAULT_SEMANTICS = {"metric_scale_factor": 1.0, "ground_plane_offset": 0.0, "flip_y": True}
 
 
+def background_rotation_degrees(flip_y: bool, rotation_x: float | None) -> float:
+    """Mirror of the rotation line in src/modules/collider/worldTransform.ts.
+
+        rotation: [rotationX ?? (flipY ? Math.PI : 0), 0, 0]
+
+    `??` falls back on null/undefined only, so an explicit `rotation_x` of 0 has
+    to win over `flip_y` -- hence `is not None` rather than a truth test. The
+    viewer has its own test pinning that exact case.
+
+    Nerfstudio worlds are the reason this exists: they are Z-up, and arrive with
+    `flip_y: false` and `rotation_x: -pi/2`. Read only `flip_y`, and they export
+    with no rotation at all -- lying on one side, with a wall where the floor
+    should be, which a navigation map then happily grids.
+    """
+    if rotation_x is not None:
+        return math.degrees(rotation_x)
+    return 180.0 if flip_y else 0.0
+
+
 def fail(message: str) -> NoReturn:
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(1)
@@ -135,6 +154,7 @@ class WorldSource:
     splat_lod: str
     collider_path: Path | None
     flip_y: bool
+    rotation_x: float | None
     metric_scale_factor: float
     ground_plane_offset: float
     scene: dict[str, Any]
@@ -201,6 +221,10 @@ def resolve_world(slug: str, requested_lod: str) -> WorldSource:
         splat_lod=lod,
         collider_path=collider,
         flip_y=bool(semantics.get("flip_y", True)),
+        rotation_x=(
+            None if semantics.get("rotation_x") is None
+            else float(semantics["rotation_x"])
+        ),
         metric_scale_factor=metric_scale_factor,
         ground_plane_offset=ground_plane_offset,
         scene=scene,
@@ -491,10 +515,12 @@ def build_stage(
 
     # --- background -------------------------------------------------------
     background = UsdGeom.Xform.Define(stage, "/World/Background")
-    # Matches <group position={[0, offset, 0]} rotation={[flipY ? PI : 0, 0, 0]}
-    # scale={metricScaleFactor}> in src/modules/splat/SplatRenderer.tsx.
+    # Matches the transform both SplatRenderer.tsx and WorldCollider.tsx spread,
+    # built by worldTransform() in src/modules/collider/worldTransform.ts.
     background.AddTranslateOp().Set(Gf.Vec3d(0.0, world.ground_plane_offset, 0.0))
-    background.AddRotateXOp().Set(180.0 if world.flip_y else 0.0)
+    background.AddRotateXOp().Set(
+        background_rotation_degrees(world.flip_y, world.rotation_x)
+    )
     background.AddScaleOp().Set(Gf.Vec3f(*([world.metric_scale_factor] * 3)))
 
     if include_splat:
