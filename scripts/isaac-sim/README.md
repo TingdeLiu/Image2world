@@ -160,6 +160,71 @@ experience that never depends on `omni.hydra.rtx` at all, which starts in 1.3 s
 instead of 45. It is no longer needed for the crash, but it is a fast way to run
 physics-only work.
 
+## Checking the map the way a nav stack will read it (`check_navmap.py`)
+
+```bash
+scripts/usd-export/.venv/Scripts/python scripts/isaac-sim/check_navmap.py   public/worlds/marble-office/export/marble-office-navmap.yaml --robot-radius 0.25
+```
+
+Writing a `map_server` YAML is not the same as writing one a planner can use,
+and the parts most likely to be wrong are the boring ones: which corner the
+origin names, which way the image rows run, and whether the thresholds put our
+three greys in the buckets we meant. A sign error in the row order is invisible
+in the picture -- it just silently mirrors the room.
+
+So this loads the pair by `map_server`'s own rules, rebuilds the `OccupancyGrid`
+it would publish, cross-checks the cell counts against the JSON `build_navmap`
+wrote, and plans an 8-connected route across it. It exits non-zero when the free
+space is not connected. Plain Python; `--ros` additionally publishes through
+rclpy and reads the message back.
+
+Measured on both worlds:
+
+| | marble-office | marble-from-photo-7y19ti |
+| --- | --- | --- |
+| Grid | 247 x 276 @ 5 cm | 180 x 191 @ 5 cm |
+| Free | 83.76 m2 | 20.27 m2 |
+| Counts vs `build_navmap` | identical, cell for cell | identical |
+| Planned route | 10.66 m, straight line 9.77 (detour x1.09) | 5.56 m, straight 5.45 (x1.02) |
+
+The route starts at the world origin, which lands in cell (-0.01, 0.02) -- the
+origin convention survives the trip into ROS coordinates.
+
+### Walls or holes: the inflation result worth knowing
+
+With `--robot-radius` the check runs twice, growing the obstacles alone and then
+growing the unknown cells too, because the difference says something different
+about the world:
+
+| marble-office, r=0.25 m | Passable | Route |
+| --- | --- | --- |
+| obstacles only | 69.92 m2 | 10.39 m, plans fine |
+| obstacles and holes | 62.56 m2 | **no path -- not connected** |
+
+So the walls are far enough apart for a Nova Carter-sized robot; what breaks
+connectivity is the 72.56 m2 of cells with no floor under them. That is a
+reconstruction result, not a planning one, and it would be easy to misread as
+"the robot does not fit" if the two were inflated together -- which is what
+`build_navmap.py --robot-radius` does, deliberately, since a hole is as bad to
+drive into as a wall.
+
+### What is not verified
+
+**nav2 itself has never loaded this map.** `ros-humble-navigation2` is not
+installed in the WSL distro here and installing it needs a password:
+
+```bash
+sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup
+```
+
+**Cross-process ROS discovery does not work in this WSL2 instance.** The
+publisher above is visible to a subscriber in the same process -- the grid comes
+back identical -- but `ros2 topic list` in a second process does not see `/map`.
+`ROS_LOCALHOST_ONLY=1` and a FastDDS profile pinned to loopback with explicit
+unicast peers both failed to fix it; only `rmw_fastrtps_cpp` is installed, so
+switching implementation was not an option. This is a WSL networking problem
+rather than anything about the map, but it blocks a real nav2 run too.
+
 ## Walking the map on the keyboard (`teleop.py`)
 
 ```bash

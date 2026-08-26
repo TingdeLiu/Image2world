@@ -262,6 +262,30 @@ walks on it. The cause is open again. Either way the navigation map is
 unaffected, being built from raycasts. `scripts/isaac-sim/README.md` has the
 table of what was ruled out.
 
+## Checking the map before a planner sees it
+
+```bash
+scripts/usd-export/.venv/Scripts/python scripts/isaac-sim/check_navmap.py   public/worlds/marble-office/export/marble-office-navmap.yaml --robot-radius 0.25
+```
+
+Loads the YAML and image by `map_server`'s own rules, rebuilds the
+`OccupancyGrid` it would publish, checks the cell counts against what
+`build_navmap` recorded, and plans a route across it. Both worlds pass: counts
+identical cell for cell, and a route from the world origin to the furthest
+reachable cell (10.66 m on `marble-office`, a 1.09x detour on a 9.77 m straight
+line). Published through rclpy, the grid comes back byte-identical.
+
+One result is worth stating on its own. With a 0.25 m robot radius, growing only
+the obstacles leaves 69.92 m2 passable and a route plans; also growing the
+no-floor cells leaves 62.56 m2 and **no route at all**. The walls are far enough
+apart for a robot that size -- what breaks the map is the 72.56 m2 of holes in
+the reconstruction. Inflating the two together, which is what
+`build_navmap.py --robot-radius` does, would read as "the robot does not fit".
+
+nav2 itself has not loaded this map: it is not installed here, and cross-process
+ROS discovery does not work in this WSL2 instance. `scripts/isaac-sim/README.md`
+has the detail.
+
 ## Limitations
 
 * **No despeckle.** `build_walkable.py` closes pinholes and drops specks before
