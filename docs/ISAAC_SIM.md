@@ -282,9 +282,27 @@ apart for a robot that size -- what breaks the map is the 72.56 m2 of holes in
 the reconstruction. Inflating the two together, which is what
 `build_navmap.py --robot-radius` does, would read as "the robot does not fit".
 
-nav2 itself has not loaded this map: it is not installed here, and cross-process
-ROS discovery does not work in this WSL2 instance. `scripts/isaac-sim/README.md`
-has the detail.
+### nav2 plans on it
+
+```bash
+bash scripts/isaac-sim/nav2_check.sh <map>.yaml 3.79,9.02 0,0   # inside WSL
+```
+
+The real stack, not a stand-in: `nav2_map_server` publishing the grid,
+`nav2_planner` running NavFn over a `nav2_costmap_2d` global costmap at
+`robot_radius: 0.25` and `allow_unknown: false`, asked through the
+`ComputePathToPose` action. `marble-office` plans 405 poses over 10.23 m;
+`marble-from-photo-7y19ti` 215 poses over 5.42 m. `map_server` republishes the
+grid to the last digit of the origin `build_navmap.py` wrote.
+
+Asked for a goal out in the no-floor region, nav2 refuses with an empty path, so
+it is reading the map rather than drawing lines.
+
+This also settles the walls-versus-holes question above for a real stack: nav2's
+10.23 m matches the obstacles-only figure, not the obstacles-and-holes one that
+had no path. Its inflation layer grows lethal obstacles, while unknown cells are
+`NO_INFORMATION` and are simply not routed through. `scripts/isaac-sim/README.md`
+has the rest, including the WSL DDS problem that had to be solved first.
 
 ## Limitations
 

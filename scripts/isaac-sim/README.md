@@ -208,22 +208,69 @@ reconstruction result, not a planning one, and it would be easy to misread as
 `build_navmap.py --robot-radius` does, deliberately, since a hole is as bad to
 drive into as a wall.
 
-### What is not verified
-
-**nav2 itself has never loaded this map.** `ros-humble-navigation2` is not
-installed in the WSL distro here and installing it needs a password:
+### nav2 itself plans on it
 
 ```bash
-sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup
+# inside WSL
+bash scripts/isaac-sim/nav2_check.sh /mnt/d/.../marble-office-navmap.yaml 3.79,9.02 0,0
 ```
 
-**Cross-process ROS discovery does not work in this WSL2 instance.** The
-publisher above is visible to a subscriber in the same process -- the grid comes
-back identical -- but `ros2 topic list` in a second process does not see `/map`.
-`ROS_LOCALHOST_ONLY=1` and a FastDDS profile pinned to loopback with explicit
-unicast peers both failed to fix it; only `rmw_fastrtps_cpp` is installed, so
-switching implementation was not an option. This is a WSL networking problem
-rather than anything about the map, but it blocks a real nav2 run too.
+Brings up `nav2_map_server` and `nav2_planner` (NavFn over a `nav2_costmap_2d`
+global costmap at `robot_radius: 0.25`, `allow_unknown: false`), drives their
+lifecycle transitions, and asks for a route through the real
+`ComputePathToPose` action. Deliberately not a full bringup: no localisation,
+no controller, no behaviour tree. Those need a robot and say nothing about
+whether the map is usable.
+
+| World | nav2 route | `check_navmap.py` A* |
+| --- | --- | --- |
+| `marble-office` | 405 poses, **10.23 m** (detour x1.07) | 10.39 m, obstacles-only |
+| `marble-from-photo-7y19ti` | 215 poses, **5.42 m** (detour x1.04) | 5.56 m |
+
+`map_server` republishes the grid unchanged: 247 x 276 @ 0.05 m, origin
+(-5.235311692253731, -4.7518977547521235) -- every digit of what
+`build_navmap.py` wrote.
+
+**The negative control matters as much as the route.** Asked for a goal at
+(6.50, -4.30), out in the no-floor region, nav2 refuses: *"failed to generate a
+valid path"*, empty path, action aborted. It is respecting the occupied and
+unknown cells rather than drawing a line.
+
+**This also settles the walls-versus-holes question for a real stack.** nav2's
+10.23 m matches the obstacles-only A* (10.39 m), not the obstacles-and-holes
+scenario, which had no path at all. nav2's inflation layer grows lethal
+obstacles; unknown cells are `NO_INFORMATION` and are not inflated around --
+they simply cannot be routed through. So the disconnection `build_navmap.py
+--robot-radius` reports is a property of that flag inflating both, and does not
+mean nav2 would refuse the map.
+
+One blemish, reported rather than hidden: the planner logs a burst of
+`worldToMap failed: mx,my: 187,284, size_x,size_y: 247,276` at ERROR level on
+every run. Row 284 is past the 276-row map. The plan succeeds anyway and the
+route is sane, so this has not been chased.
+
+### The DDS problem this uncovered, and its fix
+
+Cross-process ROS communication did not work in this WSL2 instance at all --
+not for our nodes, and not for `demo_nodes_cpp talker` and `listener`, which
+came up cleanly and never heard each other. `ros2 node list` was empty
+throughout. Nothing logged an error.
+
+The cause: **WSL2 in mirrored networking mode gives `lo` no MULTICAST flag**, so
+DDS discovery over loopback is impossible. `ROS_LOCALHOST_ONLY=1` -- the usual
+first advice -- forces discovery onto exactly that interface and makes it worse.
+Raw multicast on the real NIC works fine, which is what made this confusing:
+`ros2 multicast send`/`receive` pass.
+
+`nav2_check.sh` finds a multicast-capable global interface, skipping `/32`
+addresses so a tunnel interface is not chosen, and writes a FastDDS profile
+whitelisting it with the builtin transports off. Talker and listener then hear
+each other immediately.
+
+Three things tried first, all wrong: `ROS_LOCALHOST_ONLY=1`, a FastDDS profile
+pinned to 127.0.0.1 (the one interface that cannot work), and UDP-only with no
+whitelist. Also checked and cleared: `/dev/shm` size and permissions, and the
+`ros2` CLI daemon (`--no-daemon` changed nothing).
 
 ## Walking the map on the keyboard (`teleop.py`)
 
