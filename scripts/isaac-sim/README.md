@@ -356,6 +356,34 @@ just lie at z=0.196. The callback now counts its own steps and reports its own
 exceptions; without that, every downstream conclusion is a guess between two
 indistinguishable states.
 
+### All four robots, measured
+
+| Robot | Policy dt | In `marble-office` | On NVIDIA's flat grid |
+| --- | --- | --- | --- |
+| `spot` (quadruped) | 0.002 / 500 Hz | 2.67 m, ends fallen | 4.39 m, upright |
+| `anymal` (quadruped) | 0.005 / 200 Hz | 2.63 m, ends fallen at 0.24 m | not run |
+| `h1` (humanoid biped) | 0.005 / 200 Hz | **2.33 m, upright throughout at 0.87 m** | not run |
+| `go2` (quadruped) | 0.005 / 200 Hz | **0.01 m -- never stands** | 4.20 m, locomotes |
+
+Walking forward for 10 s each; only Spot has been driven interactively.
+
+Two things here matter more than the distances.
+
+**The policy rates disagree.** Spot wants 500 Hz, the other three want 200 Hz.
+A hardcoded 1/200 is right for three of the four, which is exactly why the Spot
+failure was so hard to place -- copying a number from an example works until it
+does not. Reading `_dt` off the loaded policy is the only version that is right
+for every robot.
+
+**Size tracks success, and the obvious explanation does not hold.** The two
+small machines fail on the reconstructed floor and the three larger ones walk on
+it: Go2 covers 4.20 m on flat ground and 0.01 m here, the same shape as the
+wheeled robot's failure below. The tempting story is that small feet and wheels
+catch on marching-cubes detail -- but a 1600-point height scan over 2 x 2 m of
+that floor measured a range of 0.000 m. The correlation is real; the cause is
+not. The humanoid holding station at 0.87 m for a whole run, while both
+quadrupeds that walked ended up fallen, was not expected either.
+
 ## Driving a wheeled robot in the world (`drive_robot.py`)
 
 Puts a Nova Carter in the scene and drives it with a differential controller,

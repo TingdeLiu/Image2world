@@ -248,7 +248,25 @@ like it works:
 | the policy's own dt, 1.0 m/s | 4.39 m on flat ground, upright throughout |
 
 `walk_robot.py` reads `_dt` off the loaded policy and sets the physics rate from
-it, so this is handled for whichever robot you pick.
+it, so this is handled for whichever robot you pick. It has to be: Spot wants
+500 Hz and the other three want 200 Hz, so a hardcoded 1/200 is right for three
+of the four -- which is precisely why the Spot failure was so hard to place.
+
+All four, walking forward for 10 s in `marble-office`:
+
+| Robot | Policy dt | In `marble-office` | On NVIDIA's flat grid |
+| --- | --- | --- | --- |
+| `spot` (quadruped) | 0.002 / 500 Hz | 2.67 m, ends fallen | 4.39 m, upright |
+| `anymal` (quadruped) | 0.005 / 200 Hz | 2.63 m, ends fallen at 0.24 m | not run |
+| `h1` (humanoid biped) | 0.005 / 200 Hz | **2.33 m, upright throughout at 0.87 m** | not run |
+| `go2` (quadruped) | 0.005 / 200 Hz | **0.01 m -- never stands** | 4.20 m, locomotes |
+
+Size tracks success, and the obvious explanation does not hold. The two small
+machines fail on the reconstructed floor while the three larger ones walk on it
+-- Go2 covers 4.20 m on flat ground and 0.01 m here, the same shape as the
+wheeled robot's failure below. But a 1600-point height scan over 2 x 2 m of that
+floor measured a range of 0.000 m, so "small feet catch on rough geometry" does
+not survive the measurement. The correlation is real; the cause is not known.
 
 **The wheeled robot is still unresolved.** `drive_robot.py` spawns a Nova Carter
 and drives it with a differential controller. It loads, falls under gravity,
