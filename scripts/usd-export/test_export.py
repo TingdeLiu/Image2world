@@ -12,6 +12,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import subprocess
@@ -47,9 +48,20 @@ def find_fixture_world() -> str | None:
 
 
 FIXTURE_WORLD = find_fixture_world()
+
+try:  # OpenUSD is a heavy dependency and only the stage-building tests need it.
+    import pxr  # noqa: F401
+
+    HAS_USD = True
+except ImportError:
+    HAS_USD = False
+
+# Two separate reasons to skip, and both are worth naming. CI has no generated
+# worlds -- they are local data -- and no OpenUSD, because the contract tests
+# that matter most there read TypeScript source and need neither.
 needs_world = pytest.mark.skipif(
-    FIXTURE_WORLD is None,
-    reason="no generated world with a collision mesh in public/worlds/",
+    FIXTURE_WORLD is None or not HAS_USD,
+    reason="needs a generated world in public/worlds/ and OpenUSD (pip install usd-core)",
 )
 
 
@@ -139,6 +151,49 @@ def test_background_rotation_mirrors_the_typescript():
     assert exporter.background_rotation_degrees(True, -math.pi / 2) == pytest.approx(-90.0)
     # ... including an explicit zero, which `??` keeps and a truth test loses.
     assert exporter.background_rotation_degrees(True, 0.0) == 0.0
+
+
+def _synthetic_world(root, slug, semantics):
+    """The least on disk that `resolve_world` will accept.
+
+    It never opens the splat, only finds it, so an empty file is enough. This
+    exists because no world in `public/worlds` carries `rotation_x` -- the ones
+    that would are video reconstructions, which are not checked in -- and the
+    path from `semantics_metadata` to the exporter's field had no test at all.
+    """
+    world_dir = root / slug / "output" / "world"
+    world_dir.mkdir(parents=True)
+    (world_dir / "0-world-500k.spz").write_bytes(b"")
+    (world_dir / "0-world.json").write_text(
+        json.dumps({"assets": {"splats": {"semantics_metadata": semantics}}}),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_resolve_world_reads_rotation_x(tmp_path, monkeypatch):
+    """A Nerfstudio world arrives as flip_y false plus an explicit rotation."""
+    monkeypatch.setattr(
+        exporter, "WORLDS_DIR",
+        _synthetic_world(tmp_path, "zup", {"flip_y": False, "rotation_x": -math.pi / 2}),
+    )
+    world = exporter.resolve_world("zup", "500k")
+    assert world.flip_y is False
+    assert world.rotation_x == pytest.approx(-math.pi / 2)
+    # The value the exporter would actually author on /World/Background.
+    assert exporter.background_rotation_degrees(
+        world.flip_y, world.rotation_x
+    ) == pytest.approx(-90.0)
+
+
+def test_resolve_world_without_rotation_x_falls_back_to_flip_y(tmp_path, monkeypatch):
+    """A Marble world says nothing about rotation, and must keep the old 180."""
+    monkeypatch.setattr(
+        exporter, "WORLDS_DIR", _synthetic_world(tmp_path, "marble", {"flip_y": True}),
+    )
+    world = exporter.resolve_world("marble", "500k")
+    assert world.rotation_x is None
+    assert exporter.background_rotation_degrees(world.flip_y, world.rotation_x) == 180.0
 
 
 def test_sun_direction_contract():
