@@ -49,13 +49,13 @@ exporter**. The measurements below are from `marble-office`:
 | Is it metrically correct? | Yes — floor hit 1.367 m below a probe placed 1.371 m above it |
 | Does PhysX collide with it? | Yes — walls hit at 1.26 / 5.35 / 4.25 / 6.92 m in a 12.38 × 13.84 × 2.94 m room |
 | Is the room enclosed? | Nearly — 2 to 5 of 72 horizontal directions escape, versus 8 of 24 for a SHARP world |
-| Usable free area | 83.8 m² reachable free, 14.1 m² obstacle at 5 cm resolution — 87.3 m² before the reachability pass |
+| Usable free area | 83.8 m² reachable free, 14.1 m² obstacle at 5 cm resolution — 87.4 m² before the reachability pass |
 
 The splat must be left out (`--no-splat`): `ParticleField3DGaussianSplat`
 needs OpenUSD 26.03 and Isaac Sim 5.1 ships 24.05. See `../usd-export/README.md`
 for the wider support table.
 
-### CollisionAPI on the parent Xform is enough
+### CollisionAPI on the parent Xform is enough, but the approximation is stated
 
 `export_world_usd.py` applies `UsdPhysics.CollisionAPI` once, to the
 `/World/Background/Collider` Xform, rather than to each of the five classified
@@ -68,6 +68,16 @@ all three produce identical raycast hits. The only difference is that per-mesh
 colliders report the hit against `/Collider/floor` rather than `/Collider`,
 which is useful if you want the surface class of what you hit and irrelevant
 otherwise.
+
+The exporter now authors `MeshCollisionAPI` with `approximation = none` on each
+of those meshes anyway. Not because the behaviour changes — it does not, and
+re-exporting moved `raw free` by only the 27 cells the `ceil` fix added — but
+because that behaviour was coming from a schema default rather than from
+anything we asked for, and the default is load-bearing: a convex hull would
+swallow the doorways, the gaps under furniture and the holes the reconstruction
+left, and the map would come back as one solid slab of floor. A test asserts it,
+and also asserts the background is not a rigid body, since a triangle mesh can
+only be static and PhysX quietly substitutes a hull otherwise.
 
 ## Usage
 
@@ -96,6 +106,8 @@ stack. White is free, black is obstacle, grey is "no floor here".
 | `--robot-radius` | `0.0` | grow obstacles by this radius before writing the map |
 | `--spawn` | largest region | `X,Y` in world metres to flood fill from |
 | `--no-reachability` | off | keep free cells with no route to the spawn |
+| `--border` | `0.5` | metres of unknown margin around the grid |
+| `--max-step` | `0.0` | tallest step the flood fill may cross; 0 keeps it 2D |
 
 ### Two passes turn "there is floor" into "a robot could be here"
 
@@ -110,6 +122,11 @@ route in.
 
 `--robot-radius` defaults to 0 because nav2 inflates in its own costmap layer
 and would otherwise do it twice.
+
+`--border` is on by default because a grid that stops exactly at the collider's
+bounding box has free cells in its last row, and both the inflation here and a
+planner's own neighbourhood queries then run off the end of the array. Set it to
+`0` to get the bare bounding box back.
 
 With no `--spawn`, the largest connected region is taken as "the room". Each run
 also reports whether the world origin — where the viewer spawns a character —
@@ -174,18 +191,28 @@ in the picture -- it just silently mirrors the room.
 
 So this loads the pair by `map_server`'s own rules, rebuilds the `OccupancyGrid`
 it would publish, cross-checks the cell counts against the JSON `build_navmap`
-wrote, and plans an 8-connected route across it. It exits non-zero when the free
-space is not connected. Plain Python; `--ros` additionally publishes through
-rclpy and reads the message back.
+wrote, and plans an 8-connected route across it. Plain Python; `--ros`
+additionally publishes through rclpy and reads the message back, and pins DDS to
+a multicast-capable interface itself, so it no longer needs `nav2_check.sh` to
+have set that up first (see the DDS section below for why WSL needs it).
+
+It exits non-zero when the **obstacles alone** leave no route. The
+obstacles-and-holes scenario prints as a note instead, because those are
+different findings and only the first is about the map: the second is the
+reconstruction's holes, which are always there, and which nav2 does not inflate
+around anyway.
 
 Measured on both worlds:
 
 | | marble-office | marble-from-photo-7y19ti |
 | --- | --- | --- |
-| Grid | 247 x 276 @ 5 cm | 180 x 191 @ 5 cm |
-| Free | 83.76 m2 | 20.27 m2 |
+| Grid | 268 x 297 @ 5 cm | 201 x 212 @ 5 cm |
+| Free | 83.83 m2 | 20.27 m2 |
 | Counts vs `build_navmap` | identical, cell for cell | identical |
-| Planned route | 10.66 m, straight line 9.77 (detour x1.09) | 5.56 m, straight 5.45 (x1.02) |
+| Planned route | 10.66 m, straight line 9.80 (detour x1.09) | 5.56 m, straight 5.45 (x1.02) |
+
+Both grids include the 0.5 m unknown border, which is why they are 20 cells
+wider than the collider's bounding box in each direction.
 
 The route starts at the world origin, which lands in cell (-0.01, 0.02) -- the
 origin convention survives the trip into ROS coordinates.
@@ -198,15 +225,21 @@ about the world:
 
 | marble-office, r=0.25 m | Passable | Route |
 | --- | --- | --- |
-| obstacles only | 69.92 m2 | 10.39 m, plans fine |
-| obstacles and holes | 62.56 m2 | **no path -- not connected** |
+| obstacles only | 69.97 m2 | 10.42 m, plans fine |
+| obstacles and holes | 60.83 m2 | **no path -- not connected** |
 
 So the walls are far enough apart for a Nova Carter-sized robot; what breaks
-connectivity is the 72.56 m2 of cells with no floor under them. That is a
+connectivity is the 73.79 m2 of cells with no floor under them. That is a
 reconstruction result, not a planning one, and it would be easy to misread as
 "the robot does not fit" if the two were inflated together -- which is what
 `build_navmap.py --robot-radius` does, deliberately, since a hole is as bad to
 drive into as a wall.
+
+Only the first row can fail the run. Both used to, which meant `--robot-radius`
+never came back green on real reconstruction data, and a genuine regression
+would have looked exactly like the holes that are always there. The second row
+now prints as a note. nav2 agrees with the split, for the reason two sections
+down: it inflates lethal obstacles and leaves unknown cells alone.
 
 ### nav2 itself plans on it
 
@@ -224,11 +257,11 @@ whether the map is usable.
 
 | World | nav2 route | `check_navmap.py` A* |
 | --- | --- | --- |
-| `marble-office` | 405 poses, **10.23 m** (detour x1.07) | 10.39 m, obstacles-only |
-| `marble-from-photo-7y19ti` | 215 poses, **5.42 m** (detour x1.04) | 5.56 m |
+| `marble-office` | 404 poses, **10.27 m** (detour x1.07) | 10.42 m, obstacles-only |
+| `marble-from-photo-7y19ti` | 213 poses, **5.36 m** (detour x1.03) | 5.30 m |
 
-`map_server` republishes the grid unchanged: 247 x 276 @ 0.05 m, origin
-(-5.235311692253731, -4.7518977547521235) -- every digit of what
+`map_server` republishes the grid unchanged: 268 x 297 @ 0.05 m, origin
+(-5.735311692253731, -5.2518977547521235) -- every digit of what
 `build_navmap.py` wrote.
 
 **The negative control matters as much as the route.** Asked for a goal at
@@ -237,17 +270,34 @@ valid path"*, empty path, action aborted. It is respecting the occupied and
 unknown cells rather than drawing a line.
 
 **This also settles the walls-versus-holes question for a real stack.** nav2's
-10.23 m matches the obstacles-only A* (10.39 m), not the obstacles-and-holes
+10.27 m matches the obstacles-only A* (10.42 m), not the obstacles-and-holes
 scenario, which had no path at all. nav2's inflation layer grows lethal
 obstacles; unknown cells are `NO_INFORMATION` and are not inflated around --
 they simply cannot be routed through. So the disconnection `build_navmap.py
 --robot-radius` reports is a property of that flag inflating both, and does not
 mean nav2 would refuse the map.
 
-One blemish, reported rather than hidden: the planner logs a burst of
-`worldToMap failed: mx,my: 187,284, size_x,size_y: 247,276` at ERROR level on
-every run. Row 284 is past the 276-row map. The plan succeeds anyway and the
-route is sane, so this has not been chased.
+### The ERROR storm, and what it was really saying
+
+The planner used to log roughly 400 lines of `worldToMap failed: mx,my: 187,284,
+size_x,size_y: 247,276` at ERROR level on every run -- which is what a broken
+stack looks like from the log, and it was not the plan failing.
+
+Row 284 is eight rows past the 276-row map, and the numbers say which code path
+found it: `mx` sweeps while `my` stays put, so something is scanning a
+rectangle. NavFn scans a square of `tolerance` -- 0.5 m, ten cells -- around the
+goal, looking for a reachable substitute, and reports every cell of that square
+that lies past the edge of the map this way. The goal sat within ten cells of
+the top row, so a fifth of its search box was off the map.
+
+`build_navmap.py --border` pads the grid with 0.5 m of unknown cells, and the
+count is now **zero** on both worlds. That is not only cosmetic: with the search
+no longer clipped, the returned path ends on the goal itself, `(3.29, 9.02)`,
+instead of five centimetres short at `(3.29, 8.97)`.
+
+The general lesson is the one this project keeps relearning: read what the error
+actually says. `my` fixed while `mx` sweeps was enough to name the code path
+without reading a line of nav2's source.
 
 ### The DDS problem this uncovered, and its fix
 
@@ -476,7 +526,7 @@ it wherever the reconstruction has no floor — and if you count that as floor,
 every cell in the bounding box comes back walkable, including the ground outside
 the building. Measured on `marble-office`: 155.8 m² "free" and **zero** cells
 marked no-floor, against the 87.3 m² free / 69.0 m² no-floor the raw raycast
-grid gives.
+grid gave in the same run.
 
 `build_navmap.py` drops hits whose collision prim ends in `GroundPlane`. This
 only started mattering once the plane was moved to the origin — before that it
@@ -489,28 +539,44 @@ raycast grid is the one that is checked.
 
 ## Known limitations
 
-- No despeckle. `build_walkable.py` closes pinholes and drops specks before it
-  floods; this does not, so a stray occupied cell inside the room stays a
-  one-cell island. Its 83.8 m² against that tool's 73.03 m² walkable is now
-  mostly headroom (0.6 m against 1.6 m) plus its coarser 15 cm cell and that
-  despeckle pass.
-- The floor/obstacle split is a single height threshold (12 cm above the floor
-  plane), so a gentle ramp reads as floor along its whole length.
+- No despeckle, and this one is a decision rather than an omission.
+  `build_walkable.py` closes pinholes and drops specks before it floods. Doing
+  the same here was measured and rejected: `marble-office` has 3 obstacle blobs
+  of one or two cells and `marble-from-photo-7y19ti` has 11, and at 5 cm a
+  single occupied cell is exactly the width of a chair leg. Nothing in the grid
+  separates the two, and the mistakes are not symmetric — keeping a speck costs
+  a slightly tighter map, removing a real leg costs a collision. Each run now
+  reports the obstacle blob histogram instead, so the day specks stop being a
+  handful is visible. The 83.8 m² here against that tool's 73.03 m² walkable is
+  mostly headroom (0.6 m against 1.6 m) plus its coarser 15 cm cell.
+- The floor/obstacle split is a single height threshold, and it is looser than
+  `--floor-tolerance` makes it sound: the reference is the *highest* vertex of
+  the floor mesh, so on `marble-office` the band ends 0.49 m above a floor whose
+  median is 4 mm. Measured rather than assumed — see the section below — and
+  worth 0.2 m² of over-claimed floor, with `--max-step` available to remove it.
 
 ## Reachability and inflation, measured
 
-On `marble-office` the raw grid has 87.3 m² of floor spread over **33
-disconnected regions** — but 32 of them come to 3.5 m² between them. Marble
+On `marble-office` the raw grid has 87.4 m² of floor spread over **34
+disconnected regions** — but 33 of them come to 3.5 m² between them. Marble
 leaves very little unreachable scrap, which is a compliment to the
 reconstruction and the reason this pass buys less here than it would on a SHARP
 world.
 
 | World | Raw free | Regions | Dropped | Reachable | With `--robot-radius 0.25` |
 | --- | --- | --- | --- | --- | --- |
-| `marble-office` | 87.3 m² | 33 | 3.5 m² | 83.8 m² | 61.6 m² |
+| `marble-office` | 87.4 m² | 34 | 3.5 m² | 83.8 m² | 59.9 m² |
 | `marble-from-photo-7y19ti` | 20.4 m² | 17 | 0.1 m² | 20.3 m² | 11.7 m² |
 
-Inflating by 0.25 m costs `marble-office` 24.6 m² and takes it from 33 regions
+The last column moved when `--border` arrived, from 61.6 m² to 59.9 m² on
+`marble-office`, and the 1.7 m² is not lost accuracy. Before the border the
+inflation's shifts zero-filled at the array edge, which reads as "not blocked",
+so a free cell on the boundary was never grown against what lay beyond it. With
+the ring in place, off-map is unknown and inflates like any other hole. The
+robot's centre now has to stay a radius clear of the edge of what we mapped,
+which is what it should always have done.
+
+Inflating by 0.25 m costs `marble-office` 23.9 m² and takes it from 34 regions
 to 10: grown obstacles swallow the small scraps outright before the fill ever
 looks at them.
 
@@ -519,11 +585,50 @@ is `scene.json`'s `spawnPoint`, where the viewer drops a character — inside th
 kept region. That is the check that the fill latched onto the room rather than
 onto some other blob, and it costs nothing to run.
 
-Running with `--no-reachability` gives back 34922 / 5644 / 27606 cells — the
-same 87.3 / 14.1 / 69.0 m² measured before either pass existed, to the cell. The
-filters are additive; nothing under them moved.
+Running with `--no-reachability` gives back 34949 / 5652 / 28095 cells — the
+same 87.4 / 14.1 / 70.2 m² the raycast grid holds before either pass runs, to
+the cell — `raw free was 34949` in the same output. The filters are additive;
+nothing under them moved.
 
 Seeding it three different ways lands on the same region, which is a stronger
 statement than any one of them: the largest-region default, `--spawn 0,0`, and
 an off-map `--spawn 100,100` that falls back to the nearest free cell all keep
-33504 cells on `marble-office`.
+33530 cells on `marble-office`.
+
+### The flood fill is two-dimensional, and here is what that costs
+
+The fill connects cells that sit side by side in the picture, which says nothing
+about whether you could walk between them. `build_navmap.py` now records the
+ground height under every cell it calls free, and on `marble-office` the tail
+reaches the threshold:
+
+| | p50 | p95 | p99 | max | band ends at |
+| --- | --- | --- | --- | --- | --- |
+| `marble-office` | 0.004 | 0.109 | 0.159 | **0.489** | 0.491 |
+| `marble-from-photo-7y19ti` | 0.007 | 0.007 | 0.077 | **0.268** | 0.287 |
+
+`floor_top` is the *highest vertex of the floor mesh* -- one outlier sets it --
+and the walkable band is `floor_top + --floor-tolerance` above zero. On
+`marble-office` that is 0.49 m over a floor whose median is 4 mm, so a surface
+half a metre up reads as floor, and the 2D fill then joins it to the floor
+beside it as if you could step across.
+
+`--max-step` makes the fill refuse a transition taller than the robot can climb.
+Every run reports what the limit would cost, whether or not it is on:
+
+| step limit | `marble-office` | `marble-from-photo-7y19ti` |
+| --- | --- | --- |
+| none (default) | 33530 | 8107 |
+| 0.20 m | 33452 (−78) | 8104 (−3) |
+| 0.10 m | 33409 (−121) | 8096 (−11) |
+| 0.05 m | 33239 (−291) | 8061 (−46) |
+| 0.03 m | 31515 (**−2015**) | 7960 (−147) |
+
+So the half-metre platform is worth 0.2 m², not the large correction it sounded
+like -- worth knowing before rewriting the threshold. The cliff at 0.03 m is the
+reconstruction's own floor noise breaking connectivity between neighbouring
+cells, which is a lower bound on what this data can express, not a robot
+property.
+
+The default stays 0 for the same reason `--robot-radius` does: the right step
+height belongs to a particular robot, and this script does not know which one.
