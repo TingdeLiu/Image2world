@@ -72,7 +72,7 @@ Output, beside the `.usdz`:
 | `--spawn` | largest region | `X,Y` in world metres to flood fill from |
 | `--no-reachability` | off | keep free cells with no route to the spawn |
 | `--border` | `0.5` | metres of unknown margin around the grid |
-| `--max-step` | `0.0` | tallest step the flood fill may cross; 0 keeps it 2D |
+| `--max-step` | `0.0` | a taller height change between neighbours becomes an obstacle; 0 keeps the map 2D |
 
 `--robot-radius` is off by default because nav2 inflates in its own costmap
 layer and would do it twice. Set it for a planner that does not, or to see how
@@ -84,12 +84,12 @@ planner's own neighbourhood queries then run off the end of the array. Set it to
 `0` to get the bare bounding box back.
 
 `--max-step` is off by default for the same reason `--robot-radius` is: the
-right step height belongs to a particular robot. Without it the flood fill is
-purely two-dimensional and will join the floor to a surface half a metre above
-it. Every run prints what four candidate limits would cost, so the choice is
-made from numbers — on `marble-office` a 0.20 m limit costs 78 cells and a
-0.03 m limit costs 2015, the latter because the reconstruction's own floor noise
-exceeds 3 cm between neighbouring cells. See `scripts/isaac-sim/README.md`.
+right step height belongs to a particular robot, and with it off the map stays a
+measurement of the room. **Set it for any map a robot will actually drive.**
+Without it a 16 cm rise reads as flat floor, and `navigate.py` walked Spot into
+exactly that, three runs running, on a route the map said was clear. At 0.10 m
+it costs `marble-office` 1034 cells (2.6 m²). `navigate.py` warns when it loads
+a map built without it.
 
 ### 3. (Optional) get a PLY for anything that wants one
 
@@ -143,8 +143,12 @@ Both worlds, Isaac Sim 6.0.1, 5 cm cells, 0.6 m clearance:
 
 | World | Room | Free | Obstacle | No floor | Free for a 0.25 m robot |
 | --- | --- | --- | --- | --- | --- |
-| `marble-office` | 12.38 × 13.84 × 2.94 m | 83.8 m² | 14.1 m² | 73.8 m² | 59.9 m² |
-| `marble-from-photo-7y19ti` | 9.04 × 9.60 × 2.64 m | 20.3 m² | 10.0 m² | 56.6 m² | 11.7 m² |
+| `marble-office` | 12.38 × 13.84 × 2.94 m | 67.9 m² | 27.1 m² | 76.7 m² | 48.8 m² |
+| `marble-from-photo-7y19ti` | 9.04 × 9.60 × 2.64 m | 16.8 m² | 12.1 m² | 57.9 m² | 9.9 m² |
+
+Both were built with `--max-step 0.10`, without which the map calls a 16 cm
+rise floor and a robot walking on it stops there — see
+`scripts/isaac-sim/README.md`.
 
 "No floor" is the reconstruction's holes only. The grid also carries a 0.5 m
 `--border` of unknown cells — 27.3 m² on `marble-office` — which the run reports
@@ -152,8 +156,8 @@ separately, because the two mean opposite things: one is a measurement of the
 reconstruction, the other is a margin we chose.
 
 The reachability pass is worth less than it sounds like and the reason is a
-compliment to the collider: `marble-office`'s raw grid has 87.4 m² of floor in
-**34 disconnected regions**, but 33 of them add up to only 3.5 m². Marble's
+compliment to the collider: `marble-office`'s raw grid has 74.4 m² of floor in
+**150 disconnected regions**, but 149 of them add up to only 6.5 m². Marble's
 reconstruction leaves very little unreachable scrap. On a SHARP world the same
 pass would matter far more.
 
@@ -167,13 +171,19 @@ Sanity checks that the geometry survived the trip:
 * **The flood fill keeps the room the viewer drops you into.** The world origin,
   which is `scene.json`'s `spawnPoint`, survives the fill on both worlds. Had the
   fill latched onto some other blob, this is where it would show.
-* **`--no-reachability` reproduces the raw grid exactly** — 34949 free cells,
-  which is the `raw free was 34949` the same run prints, to the cell. The two
-  passes are the only thing that changed; the grid underneath them did not move.
+* **`--no-reachability` reproduces the raw grid exactly** — 29771 free
+  cells, which is the `raw free was 30805` the same run prints, to the cell. The
+  two passes are the only thing that changed; the grid underneath them did not
+  move.
 * **Three ways of seeding it agree.** The largest-region default, an explicit
   `--spawn 0,0`, and a deliberately off-map `--spawn 100,100` that falls back to
-  the nearest free cell all keep the same 33530 cells on `marble-office`. The
-  room is not an artefact of how the fill was started.
+  the nearest free cell **no longer agree**, and the disagreement is the point.
+  The largest-region default and `--spawn 0,0` both keep 27168 cells. The
+  off-map spawn now falls back into an 11-cell pocket in a far corner and keeps
+  only that — because the corrected map has 150 disconnected regions where it
+  used to have 34, so "the nearest free cell" is a much worse guess than it was.
+  The run says so on its own: `world origin reachable: False`. That flag exists
+  for exactly this, and it caught it without anyone looking.
 
 * A probe placed 1.371 m above the floor raycasts to it at 1.367 m — 4 mm.
 * Walls at 1.26 / 5.35 / 4.25 / 6.92 m from the room centre, consistent with the
@@ -181,11 +191,12 @@ Sanity checks that the geometry survived the trip:
 * Rigid bodies dropped from 1.97 m rest at 0.10–0.15 m, on the floor.
 * The map's origin (−5.235) matches `0-world-walkable.json`, the project's own
   walkable-area tool, exactly.
-* That tool reports 73.03 m² walkable against this map's 83.8 m². Both now
-  flood-fill, so the remaining gap is headroom — it assumes 1.6 m against this
-  map's 0.6 m — plus its coarser 15 cm cell and its despeckle pass. Before the
-  reachability pass this map read 87.4 m², so the fill closed a quarter of the
-  difference and the rest is accounted for.
+* That tool reports 73.03 m² walkable against this map's 67.9 m². They now
+  disagree by 7%, from opposite directions: this one assumes less headroom
+  (0.6 m against 1.6 m) but measures it from the ground under each cell rather
+  than from a single floor plane, and uses a 5 cm cell against that tool's
+  15 cm. Before the clearance ray was fixed this map read 83.8 m², which was
+  the more flattering number and the wrong one.
 
 **Marble worlds are near-sealed**, which is what makes them usable at all: 2 to 5
 of 72 horizontal directions escape at body height, against 8 of 24 for a SHARP
@@ -300,6 +311,26 @@ walks on it. The cause is open again. Either way the navigation map is
 unaffected, being built from raycasts. `scripts/isaac-sim/README.md` has the
 table of what was ruled out.
 
+## Driving it: the loop closed
+
+```bash
+D:\isaacsim-6.0.1\python.bat scripts/isaac-sim/navigate.py   public/worlds/marble-office/export/marble-office.usdz   --map public/worlds/marble-office/export/marble-office-navmap.yaml
+```
+
+Plans on the map with the same `navmap` module `check_navmap.py` uses, then
+drives a legged robot along the route under its own locomotion policy and
+reports how far it strayed from the line it was given.
+
+**Five of five goals reached across both worlds**, tracking the plan to
+0.056–0.118 m on average and never worse than 0.303 m, every run finishing
+upright at Spot's own standing height. Driven distance within 6% of planned.
+
+This is also what found the two things nothing else could: a 16 cm step the map
+called floor, and that planning nav2's way — holes passable, shortest route —
+sends the robot along the edge of the reconstruction's holes at 0.07 m. Checking
+a map against itself cannot find either, because the check reads the same grid.
+See `scripts/isaac-sim/README.md` for both.
+
 ## Checking the map before a planner sees it
 
 ```bash
@@ -314,9 +345,9 @@ reachable cell (10.66 m on `marble-office`, a 1.09x detour on a 9.80 m straight
 line). Published through rclpy, the grid comes back byte-identical.
 
 One result is worth stating on its own. With a 0.25 m robot radius, growing only
-the obstacles leaves 69.97 m2 passable and a route plans; also growing the
-no-floor cells leaves 60.83 m2 and **no route at all**. The walls are far enough
-apart for a robot that size -- what breaks the map is the 73.79 m2 of holes in
+the obstacles leaves 51.51 m2 passable and a route plans; also growing the
+no-floor cells leaves 49.09 m2 and **no route at all**. The walls are far enough
+apart for a robot that size -- what breaks the map is the 76.7 m2 of holes in
 the reconstruction. Inflating the two together, which is what
 `build_navmap.py --robot-radius` does, would read as "the robot does not fit".
 
@@ -329,15 +360,15 @@ bash scripts/isaac-sim/nav2_check.sh <map>.yaml 3.79,9.02 0,0   # inside WSL
 The real stack, not a stand-in: `nav2_map_server` publishing the grid,
 `nav2_planner` running NavFn over a `nav2_costmap_2d` global costmap at
 `robot_radius: 0.25` and `allow_unknown: false`, asked through the
-`ComputePathToPose` action. `marble-office` plans 404 poses over 10.27 m;
-`marble-from-photo-7y19ti` 213 poses over 5.36 m. `map_server` republishes the
+`ComputePathToPose` action. `marble-office` plans 407 poses over 10.88 m;
+`marble-from-photo-7y19ti` 203 poses over 5.36 m. `map_server` republishes the
 grid to the last digit of the origin `build_navmap.py` wrote.
 
 Asked for a goal out in the no-floor region, nav2 refuses with an empty path, so
 it is reading the map rather than drawing lines.
 
 This also settles the walls-versus-holes question above for a real stack: nav2's
-10.27 m matches the obstacles-only figure, not the obstacles-and-holes one that
+10.88 m matches the obstacles-only figure, not the obstacles-and-holes one that
 had no path. Its inflation layer grows lethal obstacles, while unknown cells are
 `NO_INFORMATION` and are simply not routed through. `scripts/isaac-sim/README.md`
 has the rest, including the WSL DDS problem that had to be solved first.
