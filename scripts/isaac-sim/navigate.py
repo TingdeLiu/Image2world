@@ -91,6 +91,9 @@ parser.add_argument("--headless", action="store_true")
 parser.add_argument("--out", help="directory for the report and the overlay")
 parser.add_argument("--show-collider", action="store_true",
                     help="look at the collision mesh instead of the splat")
+parser.add_argument("--obstacle", action="append", metavar="X,Y[,SIZE]", default=[],
+                    help="drop a solid box into the scene that the map does not "
+                         "know about, to exercise the recovery behaviour. Repeatable")
 args = parser.parse_args()
 
 import numpy as np  # noqa: E402  -- before SimulationApp, which is fine and much faster
@@ -206,7 +209,7 @@ from isaacsim.robot.policy.examples.robots import (  # noqa: E402
     H1FlatTerrainPolicy,
     SpotFlatTerrainPolicy,
 )
-from pxr import Usd, UsdGeom  # noqa: E402
+from pxr import Gf, Usd, UsdGeom, UsdPhysics  # noqa: E402
 
 torch = import_module("torch")
 
@@ -287,6 +290,24 @@ else:
 spawn_xy = carte.world_of(*start_cell)
 spawn = [spawn_xy[0], spawn_xy[1], floor_z + SPAWN_HEIGHT]
 print(f"floor z={floor_z:.3f}, spawn {tuple(round(v, 3) for v in spawn)} ({args.robot})")
+
+# --- something the map does not know about -------------------------------
+# The recovery path is the one part of this that no successful run exercises, so
+# without a way to provoke it, it is aspiration rather than behaviour. A static
+# box in the scene and nothing in the map is the honest version of the case it
+# exists for: someone left a chair in the corridor after the survey.
+for spec in args.obstacle:
+    numbers = [float(v) for v in spec.split(",")]
+    ox, oy = numbers[0], numbers[1]
+    side = numbers[2] if len(numbers) > 2 else 0.6
+    index = args.obstacle.index(spec)
+    cube = UsdGeom.Cube.Define(stage, f"/World/Obstacle_{index}")
+    cube.CreateSizeAttr(1.0)
+    cube.AddTranslateOp().Set(Gf.Vec3d(ox, oy, floor_z + side / 2.0))
+    cube.AddScaleOp().Set(Gf.Vec3f(side, side, side))
+    # Collision but no rigid body: it is furniture, not a projectile.
+    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+    print(f"dropped a {side:.2f} m box at ({ox}, {oy}) that the map does not have")
 
 robot = POLICY_CLASS(prim_path=f"/World/{args.robot}", position=spawn)
 policy_dt = getattr(robot, "_dt", None)
@@ -403,6 +424,11 @@ def command_towards(target, here, final_leg):
 
 
 goal_xy = waypoints[-1]
+# Kept because `waypoints` is replaced by every recovery, and the picture is
+# supposed to show the route the robot was originally given against the one it
+# drove. Drawing the live list put the start marker wherever the last re-plan
+# began, which reads as though the robot teleported.
+first_plan = list(waypoints)
 pursuit = Pursuit(waypoints, args.lookahead)
 # What the map does not know, learned the hard way. No reconstruction is
 # complete and no threshold is right everywhere, so a stack that only trusts the
@@ -585,6 +611,7 @@ report = {
     "fell": fell,
     "recoveries": recoveries,
     "learned_obstacle_cells": int(learned.sum()),
+    "unmapped_obstacles": args.obstacle,
     "planned_m": round(planned_m, 3),
     "driven_m": round(driven_m, 3),
     "final_gap_m": round(gap, 3),
@@ -595,7 +622,9 @@ report = {
         "max": round(float(errors.max()), 4),
     },
     "standing_height_m": round(float(final[2] - floor_z), 3),
-    "waypoints": [[round(v, 3) for v in w] for w in waypoints],
+    "waypoints": [[round(v, 3) for v in w] for w in first_plan],
+    "final_waypoints": ([[round(v, 3) for v in w] for w in waypoints]
+                        if recoveries else None),
     "track": track,
     "events": events,
     "policy_steps": steps_run,
@@ -624,17 +653,25 @@ try:
         # The PNG runs top-down while the grid runs bottom-up, so y flips back.
         return (ix * scale, (carte.height - iy) * scale)
 
-    if len(waypoints) > 1:
-        draw.line([to_pixels(*w) for w in waypoints], fill=(40, 110, 255), width=2 * scale)
+    # What the robot found out, under everything else so the lines stay readable.
+    for iy, ix in np.argwhere(learned):
+        px, py = to_pixels(*carte.world_of(iy, ix))
+        draw.rectangle([px, py - scale, px + scale, py], fill=(255, 214, 102))
+    if len(first_plan) > 1:
+        draw.line([to_pixels(*w) for w in first_plan], fill=(40, 110, 255), width=2 * scale)
+    if recoveries and len(waypoints) > 1:
+        draw.line([to_pixels(*w) for w in waypoints], fill=(150, 190, 255), width=scale)
     if len(track) > 1:
         draw.line([to_pixels(p[0], p[1]) for p in track], fill=(230, 60, 60), width=scale)
-    for point, colour in ((waypoints[0], (0, 170, 0)), (goal_xy, (255, 140, 0))):
+    for point, colour in ((spawn_xy, (0, 170, 0)), (goal_xy, (255, 140, 0))):
         px, py = to_pixels(*point)
         draw.ellipse([px - 3 * scale, py - 3 * scale, px + 3 * scale, py + 3 * scale],
                      outline=colour, width=scale)
     out_png = os.path.join(out_dir, f"{name}-{args.robot}-navigate.png")
     picture.save(out_png)
-    print(f"wrote {out_png}  (blue: planned, red: driven, green: start, orange: goal)")
+    print(f"wrote {out_png}  (blue: the plan, pale blue: re-planned, "
+          f"red: driven, yellow: what the map did not have, "
+          f"green: start, orange: goal)")
 except Exception as exc:  # noqa: BLE001 - the run's result does not depend on the picture
     print(f"overlay not written: {exc!r}")
 

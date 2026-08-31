@@ -556,6 +556,32 @@ stuck), and plans again on what is left. `--recoveries` bounds the attempts and
 the report says how many cells it had to invent. This is nav2's local costmap
 and its recovery behaviours in the smallest form that does the job.
 
+**And it is tested, which took some doing.** Every successful run needs zero
+recoveries, so nothing exercises the path that matters most — it was aspiration
+rather than behaviour. `--obstacle X,Y[,SIZE]` drops a solid box into the scene
+and tells the map nothing about it, which is the honest version of the case it
+exists for: someone left a chair in the corridor after the survey.
+
+```bash
+... --goal=0.89,7.97 --obstacle 0.30,4.00,0.70
+```
+
+A 0.70 m box on a route with 1.40 m of room beside it:
+
+```
+ 10.0s  at (0.22, 3.21)  5.00 m of path left  off-line 0.02 m
+ 13.3s  something the map does not have at (0.27, 3.55)
+        -- backing off and going round: 6 waypoints, 5.22 m
+ 15.0s  at (0.24, 2.91)   <- reversing
+ 20.0s  at (-0.35, 3.41)  <- round the west side
+ 27.8s  ARRIVED at (0.77, 7.65), 0.35 m from the goal
+```
+
+Arrived, one recovery, 253 cells written off, driven 11.19 m against a planned
+8.10 m — the x1.38 *is* the detour — and still standing at 0.523 m. The overlay
+draws the original plan in blue, the re-plan in pale blue, what the robot found
+out in yellow, and the route it drove in red.
+
 ## Driving a wheeled robot in the world (`drive_robot.py`)
 
 Puts a Nova Carter in the scene and drives it with a differential controller,
