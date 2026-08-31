@@ -13,12 +13,15 @@ check, run one cell at a time, and it is what shows a robot could occupy a cell.
 
 The raw grid then gets two passes that turn "there is floor here" into "a robot
 could be here": obstacles grown by the robot's radius, and a flood fill that
-drops anything with no route to the spawn.
+drops anything with no route to the spawn. A margin of unknown cells is added
+around the whole thing first, so that neither pass -- nor a planner later --
+has to guess what lies just off the edge.
 
 See README.md for what was measured and for the Vulkan crash this works around.
 """
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -39,6 +42,13 @@ parser.add_argument("--spawn", metavar="X,Y",
                          "default is the largest connected free region")
 parser.add_argument("--no-reachability", action="store_true",
                     help="keep free cells that have no route to the spawn")
+parser.add_argument("--max-step", type=float, default=0.0,
+                    help="tallest step the robot can climb, metres; the flood fill "
+                         "will not cross a bigger height change between neighbours. "
+                         "0 keeps the fill purely 2D")
+parser.add_argument("--border", type=float, default=0.5,
+                    help="metres of unknown margin around the grid; 0 stops at the "
+                         "collider's bounding box")
 parser.add_argument("--no-renderer", action="store_true",
                     help="use the renderer-free Kit experience instead of the stock one")
 args = parser.parse_args()
@@ -203,12 +213,25 @@ except Exception as exc:  # noqa: BLE001 - report and carry on to the raycast ro
 # a hit higher up means something is in the way; no hit means there is no floor.
 print("\n--- raycast grid ---")
 x0, y0 = float(wmin[0]), float(wmin[1])
-nx = int((float(wmax[0]) - x0) / args.cell_size)
-ny = int((float(wmax[1]) - y0) / args.cell_size)
+# Round the cell count up. Truncating drops the last partial cell, so a room
+# 12.375 m wide got 247 cells and the final 2.5 cm was simply not in the map --
+# small, but it is the edge of the room, which is where the walls are. Rounding
+# up samples that strip instead; where the collider stops short of the last
+# cell's centre the raycast finds nothing and the cell reads unknown, which is
+# the truthful answer rather than a missing one.
+nx = math.ceil((float(wmax[0]) - x0) / args.cell_size)
+ny = math.ceil((float(wmax[1]) - y0) / args.cell_size)
 cast_from = floor_top + args.robot_height
 
 FREE, OCCUPIED, UNKNOWN = 0, 1, 2
 grid = np.full((ny, nx), UNKNOWN, dtype=np.uint8)
+# Where the downward ray actually landed, so the threshold can be checked rather
+# than trusted. `floor_top` is the highest vertex of the floor mesh -- one
+# outlier sets it -- and the band is `floor_top + tolerance` wide, which on
+# marble-office is 0.49 m above a floor whose median height is 0.004 m. Whether
+# that admits a real step is a question about this distribution, not about the
+# constant.
+height = np.full((ny, nx), np.nan, dtype=np.float32)
 
 for iy in range(ny):
     wy = y0 + (iy + 0.5) * args.cell_size
@@ -224,6 +247,7 @@ for iy in range(ny):
         if str(hit.get("collision", "")).endswith("GroundPlane"):
             continue
         surface_z = cast_from - float(hit["distance"])
+        height[iy, ix] = surface_z
         grid[iy, ix] = FREE if surface_z <= floor_top + args.floor_tolerance else OCCUPIED
     if iy % 50 == 0:
         print(f"  row {iy}/{ny}")
@@ -243,6 +267,32 @@ for iy in range(ny):
             grid[iy, ix] = OCCUPIED
 
 timeline.stop()
+
+# --- an explicit edge ----------------------------------------------------
+# The grid so far stops exactly at the collider's bounding box, and free cells
+# run right up to the last row. Two things go wrong there, and both are quiet:
+#
+#   * The inflation below shifts the obstacle mask and zero-fills at the array
+#     edge, which reads as "not blocked". A cell on the boundary is therefore
+#     never grown against whatever is beyond it -- the one place we know
+#     nothing about.
+#   * nav2's NavFn searches a square of `tolerance` around the goal for a
+#     reachable substitute. Where that square leaves the map it logs an ERROR
+#     per cell: a goal near the top edge produced roughly 400 of them per run,
+#     which is what a broken stack looks like from the log.
+#
+# A ring of unknown cells fixes both by saying the true thing: past the
+# reconstruction there is no floor, and we are not guessing about it.
+border_cells = int(round(args.border / args.cell_size))
+if border_cells:
+    grid = np.pad(grid, border_cells, mode="constant", constant_values=UNKNOWN)
+    height = np.pad(height, border_cells, mode="constant", constant_values=np.nan)
+    ny, nx = grid.shape
+    x0 -= border_cells * args.cell_size
+    y0 -= border_cells * args.cell_size
+    print(f"  border: {border_cells} cells ({args.border} m) of unknown on every side "
+          f"-> grid {nx}x{ny}, origin ({x0:.3f}, {y0:.3f})")
+report["border"] = {"m": args.border, "cells": border_cells}
 
 c2 = args.cell_size * args.cell_size
 raw_free = int((grid == FREE).sum())
@@ -265,7 +315,35 @@ def shift(mask, dy, dx):
     return out
 
 
-def flood(passable, seed):
+STEPS_4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+
+def climbable_steps(max_step):
+    """Per-direction mask of transitions no taller than `max_step`.
+
+    Without this the fill is purely two-dimensional, and it will happily walk
+    from the floor onto a surface half a metre above it because the two cells
+    are side by side in the picture. `marble-office` has free cells whose ground
+    is 0.489 m up, so this is not hypothetical.
+
+    A NaN on either side -- a cell the ray never hit -- compares False, which is
+    what we want: those are not free cells anyway.
+    """
+    if not max_step:
+        return None
+    masks = {}
+    for dy, dx in STEPS_4:
+        came_from = np.full_like(height, np.inf)
+        hh, ww = height.shape[0] - abs(dy), height.shape[1] - abs(dx)
+        if hh > 0 and ww > 0:
+            sy, sx, gy, gx = max(dy, 0), max(dx, 0), max(-dy, 0), max(-dx, 0)
+            came_from[sy:sy + hh, sx:sx + ww] = height[gy:gy + hh, gx:gx + ww]
+        with np.errstate(invalid="ignore"):
+            masks[(dy, dx)] = np.abs(came_from - height) <= max_step
+    return masks
+
+
+def flood(passable, seed, climbable=None):
     """Cells of `passable` reachable from `seed`, 4-connected.
 
     Four rather than eight: a diagonal pinhole between two obstacle corners is
@@ -273,16 +351,82 @@ def flood(passable, seed):
     """
     reach = seed & passable
     while True:
-        grown = passable & (
-            reach | shift(reach, 1, 0) | shift(reach, -1, 0)
-            | shift(reach, 0, 1) | shift(reach, 0, -1)
-        )
+        grown = reach.copy()
+        for direction in STEPS_4:
+            candidate = shift(reach, *direction) & passable
+            if climbable is not None:
+                candidate &= climbable[direction]
+            grown |= candidate
         if grown.sum() == reach.sum():
             return reach
         reach = grown
 
 
+def blobs(mask, steps):
+    """Connected components of a boolean mask, as lists of (iy, ix)."""
+    seen = np.zeros(mask.shape, dtype=bool)
+    height, width = mask.shape
+    out = []
+    for start in zip(*np.nonzero(mask)):
+        if seen[start]:
+            continue
+        blob, stack = [], [start]
+        seen[start] = True
+        while stack:
+            iy, ix = stack.pop()
+            blob.append((iy, ix))
+            for dy, dx in steps:
+                ny_, nx_ = iy + dy, ix + dx
+                if (0 <= ny_ < height and 0 <= nx_ < width
+                        and mask[ny_, nx_] and not seen[ny_, nx_]):
+                    seen[ny_, nx_] = True
+                    stack.append((ny_, nx_))
+        out.append(blob)
+    return out
+
+
+# Eight-connected here, the mirror of the four used for free space: a diagonal
+# run of occupied cells is one wall, while a diagonal gap is not a doorway.
+NEIGHBOURS_8 = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx]
+
+# Reported, and deliberately not acted on. It is tempting to delete the lone
+# occupied cells as raycast noise, and at 0.05 m it is exactly the wrong move:
+# one cell is 5 cm across, which is also the width of a chair leg. Nothing in
+# the grid separates the two, and the two mistakes are not symmetric -- keeping
+# a speck costs a slightly tighter map, removing a real leg costs a collision.
+# What the histogram is for is noticing when specks stop being a handful.
+obstacle_blobs = blobs(grid == OCCUPIED, NEIGHBOURS_8)
+speck_sizes = sorted(len(b) for b in obstacle_blobs)
+specks = sum(1 for n in speck_sizes if n <= 2)
+print(f"  obstacles form {len(obstacle_blobs)} blobs, largest {speck_sizes[-1] if speck_sizes else 0}"
+      f" cells, {specks} of 1-2 cells (kept: a speck and a chair leg look alike here)")
+# How high the ground is under the cells the map calls walkable. A flat room
+# puts every percentile within a centimetre or two of the floor; a tail reaching
+# toward `floor_top + tolerance` means the threshold is admitting steps, and the
+# p100 is the tallest thing a planner is being told it can drive onto.
+walkable_z = height[grid == FREE]
+walkable_z = walkable_z[~np.isnan(walkable_z)]
+if walkable_z.size:
+    percentiles = {f"p{q}": round(float(np.percentile(walkable_z, q)), 4)
+                   for q in (0, 50, 95, 99, 100)}
+    print(f"  ground under the free cells: p50={percentiles['p50']:.3f} "
+          f"p99={percentiles['p99']:.3f} max={percentiles['p100']:.3f} m "
+          f"(floor {floor_top:.3f}, band ends {floor_top + args.floor_tolerance:.3f})")
+    report["walkable_ground_z"] = {
+        "floor_top": round(floor_top, 4),
+        "band_top": round(floor_top + args.floor_tolerance, 4),
+        **percentiles,
+    }
+
+report["obstacle_blobs"] = {
+    "count": len(obstacle_blobs),
+    "largest_cells": speck_sizes[-1] if speck_sizes else 0,
+    "specks_1_2_cells": specks,
+    "sizes": speck_sizes[:40],
+}
+
 report["robot_radius"] = args.robot_radius
+report["max_step"] = args.max_step
 if args.robot_radius > 0:
     # No-floor cells are grown too. A hole in the reconstruction is at least as
     # bad to drive into as a wall, and the robot's centre has to stay a radius
@@ -306,6 +450,7 @@ if args.robot_radius > 0:
 
 if not args.no_reachability:
     free = grid == FREE
+    climbable = climbable_steps(args.max_step)
     seed_cell, regions = None, None
     if args.spawn:
         sx, sy = (float(v) for v in args.spawn.split(","))
@@ -325,7 +470,7 @@ if not args.no_reachability:
     if seed_cell is not None:
         seed = np.zeros_like(free)
         seed[seed_cell] = True
-        reach = flood(free, seed)
+        reach = flood(free, seed, climbable)
     else:
         # With no spawn to go on, the largest connected region is the best
         # guess at "the room". Everything else is a scrap the reconstruction
@@ -334,13 +479,28 @@ if not args.no_reachability:
         while remaining.any():
             seed = np.zeros_like(free)
             seed.flat[int(np.argmax(remaining))] = True
-            component = flood(free, seed)
+            component = flood(free, seed, climbable)
             regions += 1
             if component.sum() > reach.sum():
                 reach = component
             remaining &= ~component
         if reach.any():
             seed_cell = tuple(int(v) for v in np.argwhere(reach)[0])
+    # What a step limit would cost, measured rather than argued about. Run with
+    # the default --max-step 0 the fill is two-dimensional, so a surface half a
+    # metre up is connected to the floor beside it as if you could walk onto it.
+    # These are the four numbers that say how much of the room is actually
+    # reachable on foot, and they are printed whether or not the limit is on.
+    if seed_cell is not None:
+        origin_seed = np.zeros_like(free)
+        origin_seed[seed_cell] = True
+        sweep = {f"{candidate:.2f}": int(flood(free, origin_seed,
+                                               climbable_steps(candidate)).sum())
+                 for candidate in (0.03, 0.05, 0.10, 0.20)}
+        print("  reachable if the robot can only climb: "
+              + ", ".join(f"{limit} m -> {kept}" for limit, kept in sweep.items()))
+        report["step_limit_sweep"] = sweep
+
     dropped = free & ~reach
     grid[dropped] = UNKNOWN
     # The viewer spawns a character at world (0, 0). If that cell survives the
@@ -368,9 +528,18 @@ else:
 free_n = int((grid == FREE).sum())
 occ_n = int((grid == OCCUPIED).sum())
 unk_n = int((grid == UNKNOWN).sum())
+# Split the unknown count, because the two halves mean opposite things. The ring
+# is a deliberate margin and says nothing about the reconstruction; the rest is
+# where the reconstruction left no floor, and that is the number worth watching
+# between runs. Reporting only the total would make every map look worse the
+# moment the border was added.
+ring_n = nx * ny - (nx - 2 * border_cells) * (ny - 2 * border_cells) if border_cells else 0
+holes_n = unk_n - ring_n
 print(f"  grid {nx}x{ny} @ {args.cell_size} m")
 print(f"  free={free_n} ({free_n * c2:.1f} m2)  occupied={occ_n} ({occ_n * c2:.1f} m2)  "
       f"unmapped={unk_n} ({unk_n * c2:.1f} m2)   [raw free was {raw_free}]")
+print(f"  of the unmapped, {holes_n} ({holes_n * c2:.1f} m2) is missing floor "
+      f"and {ring_n} ({ring_n * c2:.1f} m2) is the border")
 
 report["raycast"] = {
     "grid": [nx, ny],
@@ -380,6 +549,9 @@ report["raycast"] = {
     "free_m2": round(free_n * c2, 2),
     "occupied_m2": round(occ_n * c2, 2),
     "unknown_m2": round(unk_n * c2, 2),
+    "unknown_holes": holes_n,
+    "unknown_holes_m2": round(holes_n * c2, 2),
+    "unknown_border": ring_n,
     "origin": [x0, y0, 0.0],
 }
 
