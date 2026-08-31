@@ -466,6 +466,36 @@ def write_mesh_layer(glb_path: Path, out_path: Path, textures_dir: Path) -> bool
     return True
 
 
+def set_mesh_approximation(root: Any, approximation: Any) -> int:
+    """State how PhysX should cook every mesh under `root`, instead of implying it.
+
+    `UsdPhysics.CollisionAPI` on its own leaves the approximation unauthored, and
+    the schema default -- the full triangle mesh -- is what a static room needs:
+    the doorways, the gaps under furniture and the holes the reconstruction left
+    are all concavities, and every one of them disappears inside a convex hull.
+    The generated map is evidence that we get the triangle mesh today (a hull
+    would make the room solid, and the raycast grid finds 84 m2 of floor with
+    structure on it), but that is a default we are relying on rather than one we
+    asked for.
+
+    Note that a triangle mesh can only ever be static. Applying RigidBodyAPI here
+    would make PhysX silently fall back to a convex hull, which is exactly the
+    failure this makes visible.
+    """
+    from pxr import UsdGeom, UsdPhysics
+
+    applied = 0
+    stack = [root]
+    while stack:
+        prim = stack.pop()
+        stack.extend(prim.GetChildren())
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set(approximation)
+        applied += 1
+    return applied
+
+
 def apply_physics(prim: Any, physics: str) -> None:
     from pxr import UsdPhysics
 
@@ -546,6 +576,7 @@ def build_stage(
                 from pxr import UsdPhysics
 
                 UsdPhysics.CollisionAPI.Apply(collider)
+                set_mesh_approximation(collider, UsdPhysics.Tokens.none)
 
     # --- foreground objects ----------------------------------------------
     if placements:
