@@ -43,9 +43,9 @@ parser.add_argument("--spawn", metavar="X,Y",
 parser.add_argument("--no-reachability", action="store_true",
                     help="keep free cells that have no route to the spawn")
 parser.add_argument("--max-step", type=float, default=0.0,
-                    help="tallest step the robot can climb, metres; the flood fill "
-                         "will not cross a bigger height change between neighbours. "
-                         "0 keeps the fill purely 2D")
+                    help="tallest step the robot can climb, metres. A bigger height "
+                         "change between neighbouring cells becomes an obstacle, and "
+                         "the flood fill will not cross it. 0 keeps the map purely 2D")
 parser.add_argument("--border", type=float, default=0.5,
                     help="metres of unknown margin around the grid; 0 stops at the "
                          "collider's bounding box")
@@ -254,14 +254,32 @@ for iy in range(ny):
 
 # A cell with clear floor can still be blocked by something the base would hit:
 # cast back up through the robot's own height and demote any cell that is not clear.
+#
+# From *this cell's* ground, not from a global reference. It used to start at
+# `floor_top + 0.05`, and `floor_top` is the highest vertex of the whole floor
+# mesh -- 0.371 m on marble-office, against ground that is actually at 0.109 m
+# along the route. Everything in the 0.26 m between them was invisible to both
+# passes: too low for the upward ray, and not the first thing the downward ray
+# met. A 16 cm step at (0.95, 6.21) sat in that band, was written to the map as
+# clear floor, and stopped Spot dead in three separate navigation runs.
+#
+# The offset is `--floor-tolerance`, which already means "this much above the
+# floor still counts as floor" -- so by definition nothing inside it obstructs.
+# It cannot be much smaller: the collision mesh is a shell with thickness, and
+# this floor's two sheets sit 10 cm apart, so a 5 cm offset makes every cell
+# that saw through a gap in the upper sheet collide with its own underside.
+# Measured, not guessed -- at 5 cm the map went from 7091 obstacle cells to
+# 38503, most of the room.
+clearance_from = args.floor_tolerance
 for iy in range(ny):
     wy = y0 + (iy + 0.5) * args.cell_size
     for ix in range(nx):
         if grid[iy, ix] != FREE:
             continue
         wx = x0 + (ix + 0.5) * args.cell_size
+        base = float(height[iy, ix]) + clearance_from
         hit = sq.raycast_closest(
-            (wx, wy, floor_top + 0.05), (0.0, 0.0, 1.0), args.robot_height
+            (wx, wy, base), (0.0, 0.0, 1.0), args.robot_height
         )
         if hit and hit.get("hit"):
             grid[iy, ix] = OCCUPIED
@@ -343,6 +361,46 @@ def climbable_steps(max_step):
     return masks
 
 
+def step_edges(max_step):
+    """Cells on either side of a height change taller than `max_step`.
+
+    A grid map has no third dimension, so a step reads as flat floor and a
+    planner routes straight over it. That is not hypothetical here: Spot walked
+    a route with 0.90 m of mapped clearance, tracking it to within 3 cm, and
+    stopped dead against a 16 cm rise at (0.95, 6.21) that the map called free.
+    The walkable band is `floor_top + tolerance` -- 0.49 m on marble-office --
+    so a surface at 0.266 m is floor by that rule, and the surface it steps up
+    from is at 0.109 m.
+
+    Marking both sides puts the fact in the map rather than in this script, so
+    nav2 and anything else reading the PNG sees it too. A ramp is unaffected by
+    construction: its height changes gradually, so no neighbouring pair exceeds
+    the limit, which is the discrimination a single height threshold cannot make.
+    """
+    edges = np.zeros(grid.shape, dtype=bool)
+    if not max_step:
+        return edges
+    known = ~np.isnan(height)
+    for dy, dx in STEPS_4:
+        neighbour = np.full_like(height, np.nan)
+        hh, ww = height.shape[0] - abs(dy), height.shape[1] - abs(dx)
+        if hh <= 0 or ww <= 0:
+            continue
+        sy, sx, gy, gx = max(dy, 0), max(dx, 0), max(-dy, 0), max(-dx, 0)
+        neighbour[sy:sy + hh, sx:sx + ww] = height[gy:gy + hh, gx:gx + ww]
+        with np.errstate(invalid="ignore"):
+            too_tall = np.abs(neighbour - height) > max_step
+        # Both sides must have been measured. Next to a cell the ray never hit
+        # there is no step to speak of -- that is a hole, and already unknown.
+        both = known & ~np.isnan(neighbour)
+        edges |= too_tall & both
+        # ... and the other side of the same pair.
+        back = np.zeros_like(edges)
+        back[gy:gy + hh, gx:gx + ww] = (too_tall & both)[sy:sy + hh, sx:sx + ww]
+        edges |= back
+    return edges
+
+
 def flood(passable, seed, climbable=None):
     """Cells of `passable` reachable from `seed`, 4-connected.
 
@@ -395,6 +453,15 @@ NEIGHBOURS_8 = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx]
 # the grid separates the two, and the two mistakes are not symmetric -- keeping
 # a speck costs a slightly tighter map, removing a real leg costs a collision.
 # What the histogram is for is noticing when specks stop being a handful.
+report["max_step"] = args.max_step
+if args.max_step > 0:
+    edges = step_edges(args.max_step) & (grid == FREE)
+    n_edges = int(edges.sum())
+    grid[edges] = OCCUPIED
+    print(f"  steps taller than {args.max_step} m: {n_edges} cells "
+          f"({n_edges * c2:.1f} m2) become obstacle")
+    report["step_edges"] = {"cells": n_edges, "m2": round(n_edges * c2, 2)}
+
 obstacle_blobs = blobs(grid == OCCUPIED, NEIGHBOURS_8)
 speck_sizes = sorted(len(b) for b in obstacle_blobs)
 specks = sum(1 for n in speck_sizes if n <= 2)
@@ -426,7 +493,6 @@ report["obstacle_blobs"] = {
 }
 
 report["robot_radius"] = args.robot_radius
-report["max_step"] = args.max_step
 if args.robot_radius > 0:
     # No-floor cells are grown too. A hole in the reconstruction is at least as
     # bad to drive into as a wall, and the robot's centre has to stay a radius
