@@ -12,11 +12,15 @@ Run:
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -47,21 +51,98 @@ def find_fixture_world() -> str | None:
     return None
 
 
+def build_synthetic_room(root: Path, slug: str) -> str | None:
+    """A world tree with a real collision mesh, for a machine that has no world.
+
+    Generated worlds are local data and are not checked in, so every CI run had
+    `FIXTURE_WORLD is None` and skipped the seven tests that open an exported
+    stage -- exactly the ones guarding the mistakes this project has actually
+    made: the floor drifting off zero, the ground plane picking up an offset it
+    must not have, the height failing to move to Z. They only ever ran on the
+    one laptop that had generated a world.
+
+    The room is a box 3 m tall, subdivided until it carries enough vertices to
+    satisfy the same assertions a real collider does. Its `ground_plane_offset`
+    is measured from the mesh on disk rather than assumed, so the test still
+    checks what it always checked -- that the exporter applies the offset with
+    the right sign, on the right prim, after the flip -- without depending on
+    trimesh keeping glTF's axes on a round trip.
+    """
+    try:
+        import trimesh
+    except ImportError:
+        return None
+
+    room = trimesh.creation.box(extents=(4.0, 3.0, 5.0))
+    room.apply_translation((0.0, 1.5, 0.0))  # floor on y=0, ceiling on y=3
+    while len(room.vertices) < 1200:  # test_collider_is_present_and_collidable
+        room = room.subdivide()
+
+    world_dir = root / slug / "output" / "world"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    glb = world_dir / "0-world.glb"
+    room.export(glb)
+
+    reloaded = trimesh.load(glb, process=False)
+    ceiling = float(reloaded.bounds[1][1])
+    # flip_y turns the room over: y -> -y, so its lowest point lands at -ceiling
+    # and the offset that puts the floor back on zero is the ceiling height.
+    (world_dir / "0-world-500k.spz").write_bytes(b"")  # found, never opened
+    (world_dir / "0-world.json").write_text(
+        json.dumps({
+            "display_name": "Synthetic Room",
+            "assets": {"splats": {"semantics_metadata": {
+                "flip_y": True,
+                "metric_scale_factor": 1.0,
+                "ground_plane_offset": ceiling,
+            }}},
+        }),
+        encoding="utf-8",
+    )
+    return slug
+
+
 FIXTURE_WORLD = find_fixture_world()
+SYNTHETIC_ROOT: Path | None = None
+if FIXTURE_WORLD is None:
+    SYNTHETIC_ROOT = Path(tempfile.mkdtemp(prefix="imageworld-usd-test-"))
+    FIXTURE_WORLD = build_synthetic_room(SYNTHETIC_ROOT, "synthetic-room")
+    if FIXTURE_WORLD is None:
+        shutil.rmtree(SYNTHETIC_ROOT, ignore_errors=True)
+        SYNTHETIC_ROOT = None
+    else:
+        atexit.register(shutil.rmtree, SYNTHETIC_ROOT, True)
+        # In-process lookups (resolve_world) read this; the export subprocess is
+        # told through IMAGEWORLD_WORLDS_DIR in run_export().
+        exporter.WORLDS_DIR = SYNTHETIC_ROOT
 
-try:  # OpenUSD is a heavy dependency and only the stage-building tests need it.
-    import pxr  # noqa: F401
+def missing_exporter_dependencies() -> list[str]:
+    """What the exporter would refuse to start without, in this interpreter.
 
-    HAS_USD = True
-except ImportError:
-    HAS_USD = False
+    The stage tests re-run the exporter through `sys.executable`, so the answer
+    has to be about this interpreter and about the exporter's whole list -- not
+    just OpenUSD. Checking only `pxr` was enough to turn six clean skips into
+    six errors on a machine that had OpenUSD and nothing else.
+    """
+    missing = []
+    for module, hint in exporter.REQUIRED_MODULES:
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(hint)
+    return missing
+
+
+MISSING_DEPENDENCIES = missing_exporter_dependencies()
 
 # Two separate reasons to skip, and both are worth naming. CI has no generated
-# worlds -- they are local data -- and no OpenUSD, because the contract tests
-# that matter most there read TypeScript source and need neither.
+# worlds -- they are local data -- and not the exporter's heavy dependencies,
+# because the contract tests that matter most there read TypeScript source and
+# need neither.
 needs_world = pytest.mark.skipif(
-    FIXTURE_WORLD is None or not HAS_USD,
-    reason="needs a generated world in public/worlds/ and OpenUSD (pip install usd-core)",
+    FIXTURE_WORLD is None or bool(MISSING_DEPENDENCIES),
+    reason=(f"needs a generated world in public/worlds/ (have: {FIXTURE_WORLD}) and "
+            f"pip install {' '.join(MISSING_DEPENDENCIES) or '-r scripts/usd-export/requirements.txt'}"),
 )
 
 
@@ -276,6 +357,9 @@ def test_sun_direction_values(rotation, expected):
 
 def run_export(tmp_path: Path, *flags: str) -> Path:
     out = tmp_path / "world.usda"
+    environment = dict(os.environ)
+    if SYNTHETIC_ROOT is not None:
+        environment["IMAGEWORLD_WORLDS_DIR"] = str(SYNTHETIC_ROOT)
     result = subprocess.run(
         [
             sys.executable,
@@ -290,6 +374,7 @@ def run_export(tmp_path: Path, *flags: str) -> Path:
         ],
         capture_output=True,
         text=True,
+        env=environment,
     )
     assert result.returncode == 0, f"export failed:\n{result.stdout}\n{result.stderr}"
     stage_path = out.parent / "bundle" / "world.usda"
@@ -360,8 +445,44 @@ def test_collider_is_present_and_collidable(y_up_stage):
 
 
 @needs_world
+def test_collider_meshes_state_their_approximation(y_up_stage):
+    """Every collision mesh must ask for the triangle mesh in writing.
+
+    Left unauthored it works by schema default, and that default is doing real
+    work: a convex hull would swallow the doorways, the gaps under furniture
+    and the holes the reconstruction left, and the navigation map built from
+    PhysX raycasts would come back as one solid block of floor. Relying on a
+    default for that is not the same as asking for it.
+    """
+    from pxr import UsdGeom, UsdPhysics
+
+    collider = y_up_stage.GetPrimAtPath("/World/Background/Collider")
+    meshes = [p for p in iter_descendants(collider) if p.IsA(UsdGeom.Mesh)]
+    assert meshes, "collider has no mesh geometry"
+    for mesh in meshes:
+        assert mesh.HasAPI(UsdPhysics.MeshCollisionAPI), (
+            f"{mesh.GetPath()} carries no MeshCollisionAPI"
+        )
+        approximation = UsdPhysics.MeshCollisionAPI(mesh).GetApproximationAttr().Get()
+        assert approximation == UsdPhysics.Tokens.none, (
+            f"{mesh.GetPath()} would be cooked as '{approximation}', not the source mesh"
+        )
+    # A triangle mesh can only be static. If the background ever becomes a rigid
+    # body, PhysX quietly swaps in a convex hull and the map goes solid.
+    assert not collider.HasAPI(UsdPhysics.RigidBodyAPI), (
+        "a rigid-body background would force PhysX off the triangle mesh"
+    )
+
+
+@needs_world
 def test_floor_sits_near_origin(y_up_stage):
-    """home-room uses the manifest's calibrated offset, so the floor lands at 0."""
+    """The manifest's calibrated offset must land the floor on zero.
+
+    Sign and order both matter and neither is visible in the viewer: the offset
+    is applied after the flip, and it belongs to the background alone. It once
+    went onto the ground plane as well, which put an invisible floor a metre
+    above the real one and every dropped rigid body on top of it.
+    """
     from pxr import Usd, UsdGeom
 
     bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])

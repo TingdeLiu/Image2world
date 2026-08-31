@@ -29,7 +29,12 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORLDS_DIR = REPO_ROOT / "public" / "worlds"
+# Overridable so a world tree can live somewhere else -- another disk, or the
+# throwaway one `test_export.py` builds when the repo carries no generated
+# worlds, which is every CI run. Generated worlds are local data and are not
+# checked in, so without this the stage tests could only ever run on a machine
+# that had already made one.
+WORLDS_DIR = Path(os.environ.get("IMAGEWORLD_WORLDS_DIR") or REPO_ROOT / "public" / "worlds")
 LOD_CHOICES = ("100k", "150k", "500k", "full_res")
 SPLAT_EXTENSIONS = (".ply", ".spz")
 
@@ -82,15 +87,33 @@ def remove_tree(path: Path, attempts: int = 5) -> None:
             time.sleep(0.2 * (attempt + 1))
 
 
-def require_dependencies() -> None:
-    if sys.version_info < (3, 11) or sys.version_info >= (3, 13):
+# Named rather than inlined into the check below, so `test_export.py` can skip
+# on exactly the same list instead of keeping its own copy. It kept its own for
+# a while, checked only `pxr`, and an interpreter with OpenUSD but no trimesh
+# turned six skips into six errors.
+REQUIRED_MODULES = (
+    ("pxr", "usd-core"),
+    ("trimesh", "trimesh"),
+)
+
+# Only the splat needs these, and the splat is optional. `usd_convert_gsplat` is
+# imported where it is used, deep inside write_splat_layer(); the check up front
+# was demanding it -- and the 3.11-3.12 interpreter it needs -- from every
+# export, including `--no-splat` runs that never touch it. That is the whole
+# collider and physics path, gated on a dependency it does not use.
+SPLAT_MODULES = (("usd_convert_gsplat", "usd-convert-gsplat[usd]"),)
+
+
+def require_dependencies(*, need_splat: bool = True) -> None:
+    if need_splat and (sys.version_info < (3, 11) or sys.version_info >= (3, 13)):
         fail(
             f"Python {sys.version_info.major}.{sys.version_info.minor} is unsupported. "
             "usd-convert-gsplat requires >=3.11,<3.13; create a separate venv "
-            "(see scripts/usd-export/README.md)."
+            "(see scripts/usd-export/README.md), or pass --no-splat, which does "
+            "not need it."
         )
     missing = []
-    for module, hint in (("pxr", "usd-core"), ("usd_convert_gsplat", "usd-convert-gsplat[usd]"), ("trimesh", "trimesh")):
+    for module, hint in REQUIRED_MODULES + (SPLAT_MODULES if need_splat else ()):
         try:
             __import__(module)
         except ImportError:
@@ -704,7 +727,7 @@ def main() -> None:
     parser.add_argument("--keep-stage", action="store_true", help="Keep the intermediate .usda stage directory")
     args = parser.parse_args()
 
-    require_dependencies()
+    require_dependencies(need_splat=not args.no_splat)
 
     world = resolve_world(args.slug, args.lod)
     placements = [] if args.no_objects else resolve_placements(world)
