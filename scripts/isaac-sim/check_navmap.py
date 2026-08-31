@@ -27,7 +27,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import heapq
 import json
 import math
 import os
@@ -37,7 +36,14 @@ import tempfile
 import time
 
 import numpy as np
-from PIL import Image
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# The loading rules, the inflation and the A* live in `navmap`, because
+# `navigate.py` drives the very map this checks. A second implementation of
+# "which cells are passable" would quietly make these two different claims.
+import navmap  # noqa: E402
+from navmap import FREE, OCCUPIED, UNKNOWN  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("yaml", help="the -navmap.yaml written by build_navmap.py")
@@ -49,61 +55,11 @@ parser.add_argument("--robot-radius", type=float, default=0.0,
                     help="treat cells within this distance of an obstacle as blocked")
 args = parser.parse_args()
 
-FREE, OCCUPIED, UNKNOWN = 0, 100, -1
-
-
-def read_yaml(path):
-    """The six keys `map_server` needs, without a YAML dependency.
-
-    Deliberately not `yaml.safe_load`: this file is written by
-    `build_navmap.py` a few lines at a time, and parsing it the same simple way
-    keeps the checker honest about what is actually in it.
-    """
-    out = {}
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#") or ":" not in line:
-                continue
-            key, _, value = line.partition(":")
-            value = value.strip()
-            if value.startswith("["):
-                out[key.strip()] = [float(v) for v in value.strip("[]").split(",")]
-            else:
-                try:
-                    out[key.strip()] = float(value)
-                except ValueError:
-                    out[key.strip()] = value
-    return out
-
-
-meta = read_yaml(args.yaml)
-for required in ("image", "resolution", "origin", "negate",
-                 "occupied_thresh", "free_thresh"):
-    if required not in meta:
-        raise SystemExit(f"{args.yaml} has no `{required}` -- map_server would refuse it")
-
-image_path = os.path.join(os.path.dirname(os.path.abspath(args.yaml)), str(meta["image"]))
-if not os.path.isfile(image_path):
-    raise SystemExit(f"image {image_path} is missing")
-
-resolution = float(meta["resolution"])
-origin = [float(v) for v in meta["origin"]]
-negate = int(meta["negate"])
-occupied_thresh = float(meta["occupied_thresh"])
-free_thresh = float(meta["free_thresh"])
-
-pixels = np.asarray(Image.open(image_path).convert("L"), dtype=np.float64)
-height, width = pixels.shape
-
-occ = pixels / 255.0 if negate else (255.0 - pixels) / 255.0
-grid = np.full((height, width), UNKNOWN, dtype=np.int8)
-grid[occ > occupied_thresh] = OCCUPIED
-grid[occ < free_thresh] = FREE
-# map_server publishes row 0 of the message as the *lowest* y, while row 0 of
-# the image is the top of the picture. Flipping here is what makes cell (0, 0)
-# of everything below sit at the origin named in the YAML.
-grid = np.flipud(grid)
+carte = navmap.load(args.yaml)
+grid = carte.grid
+height, width = carte.height, carte.width
+resolution = carte.resolution
+origin = [carte.origin[0], carte.origin[1], 0.0]
 
 print(f"map     {width} x {height} cells @ {resolution} m = "
       f"{width * resolution:.2f} x {height * resolution:.2f} m")
@@ -134,27 +90,6 @@ if os.path.isfile(report_path):
         raise SystemExit("origin in the YAML disagrees with the one in the JSON")
 
 # --- can anything actually plan on it? -----------------------------------
-def inflate(blocked, radius_m):
-    """Grow a boolean mask by a disc, in plain numpy."""
-    if radius_m <= 0:
-        return blocked
-    radius = radius_m / resolution
-    span = int(math.floor(radius))
-    grown = blocked.copy()
-    for dy in range(-span, span + 1):
-        for dx in range(-span, span + 1):
-            if not (dx or dy) or dx * dx + dy * dy > radius * radius:
-                continue
-            shifted = np.zeros_like(blocked)
-            hh, ww = height - abs(dy), width - abs(dx)
-            if hh <= 0 or ww <= 0:
-                continue
-            sy, sx, gy, gx = max(dy, 0), max(dx, 0), max(-dy, 0), max(-dx, 0)
-            shifted[sy:sy + hh, sx:sx + ww] = blocked[gy:gy + hh, gx:gx + ww]
-            grown |= shifted
-    return grown
-
-
 # Two ways to inflate, and the difference is diagnostic rather than cosmetic.
 # Growing only the obstacles asks "are the walls far enough apart"; also growing
 # the unknown cells asks "and are the holes in the reconstruction small enough".
@@ -171,60 +106,20 @@ scenarios = [("point robot", grid == FREE, True)]
 if args.robot_radius > 0:
     scenarios = [
         (f"r={args.robot_radius} m, obstacles only",
-         (grid == FREE) & ~inflate(grid == OCCUPIED, args.robot_radius), True),
+         carte.passable(args.robot_radius), True),
         (f"r={args.robot_radius} m, obstacles and holes",
-         (grid == FREE) & ~inflate(grid != FREE, args.robot_radius), False),
+         carte.passable(args.robot_radius, avoid_unknown=True), False),
     ]
 
-def cell_of(x, y):
-    return int((y - origin[1]) / resolution), int((x - origin[0]) / resolution)
-
-
-def world_of(iy, ix):
-    return origin[0] + (ix + 0.5) * resolution, origin[1] + (iy + 0.5) * resolution
+cell_of = carte.cell_of
+world_of = carte.world_of
+plan = navmap.plan
 
 
 def nearest_passable(passable, iy, ix):
-    cells = np.argwhere(passable)
-    return tuple(cells[int(np.argmin(((cells - np.array([iy, ix])) ** 2).sum(axis=1)))])
+    return navmap.nearest_passable(passable, (iy, ix))
 
 
-def plan(passable, start, goal):
-    """8-connected A*, the shape of planner a nav stack runs on a costmap."""
-    def heuristic(cell):
-        return math.hypot(cell[0] - goal[0], cell[1] - goal[1])
-
-    open_set = [(heuristic(start), 0.0, start)]
-    came, best = {}, {start: 0.0}
-    while open_set:
-        _, cost, current = heapq.heappop(open_set)
-        if current == goal:
-            path = [current]
-            while path[-1] in came:
-                path.append(came[path[-1]])
-            return path[::-1]
-        if cost > best.get(current, math.inf):
-            continue
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if not (dy or dx):
-                    continue
-                ny, nx = current[0] + dy, current[1] + dx
-                if not (0 <= ny < height and 0 <= nx < width) or not passable[ny, nx]:
-                    continue
-                # No cutting a diagonal between two blocked cells.
-                if dy and dx and not (passable[current[0], nx] and passable[ny, current[1]]):
-                    continue
-                step = cost + math.hypot(dy, dx)
-                if step < best.get((ny, nx), math.inf):
-                    best[(ny, nx)] = step
-                    came[(ny, nx)] = current
-                    heapq.heappush(open_set, (step + heuristic((ny, nx)), step, (ny, nx)))
-    return None
-
-
-# Plan from the world origin -- the viewer's own spawn point -- to the passable
-# cell furthest from it, which is the longest journey the map claims is possible.
 any_failed = False
 holes_block_the_route = False
 for label, passable, fatal in scenarios:
