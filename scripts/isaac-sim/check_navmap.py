@@ -31,7 +31,9 @@ import heapq
 import json
 import math
 import os
+import subprocess
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -158,13 +160,20 @@ def inflate(blocked, radius_m):
 # the unknown cells asks "and are the holes in the reconstruction small enough".
 # A map that passes the first and fails the second is not too narrow -- it is
 # too incomplete, and that is a reconstruction problem, not a planning one.
-scenarios = [("point robot", grid == FREE)]
+#
+# Hence the third field: only a scenario marked fatal can fail the run. Both
+# used to, which meant --robot-radius could never come back green on real
+# reconstruction data, and a genuine regression would have looked exactly like
+# the holes that are always there. nav2 agrees with the split -- it inflates
+# lethal obstacles and leaves NO_INFORMATION alone -- so the obstacles-only
+# scenario is the one that predicts what its planner does.
+scenarios = [("point robot", grid == FREE, True)]
 if args.robot_radius > 0:
     scenarios = [
         (f"r={args.robot_radius} m, obstacles only",
-         (grid == FREE) & ~inflate(grid == OCCUPIED, args.robot_radius)),
+         (grid == FREE) & ~inflate(grid == OCCUPIED, args.robot_radius), True),
         (f"r={args.robot_radius} m, obstacles and holes",
-         (grid == FREE) & ~inflate(grid != FREE, args.robot_radius)),
+         (grid == FREE) & ~inflate(grid != FREE, args.robot_radius), False),
     ]
 
 def cell_of(x, y):
@@ -217,12 +226,14 @@ def plan(passable, start, goal):
 # Plan from the world origin -- the viewer's own spawn point -- to the passable
 # cell furthest from it, which is the longest journey the map claims is possible.
 any_failed = False
-for label, passable in scenarios:
+holes_block_the_route = False
+for label, passable, fatal in scenarios:
     print(f"\n{label}: {int(passable.sum())} cells passable "
           f"({int(passable.sum()) * cell:.2f} m2)")
     if not passable.any():
         print("  no free cells at all -- nothing could plan here")
-        any_failed = True
+        any_failed |= fatal
+        holes_block_the_route |= not fatal
         continue
     start = cell_of(0.0, 0.0)
     if not (0 <= start[0] < height and 0 <= start[1] < width and passable[start]):
@@ -236,7 +247,8 @@ for label, passable in scenarios:
     if path is None:
         print(f"  NO PATH ({sx:.2f}, {sy:.2f}) -> ({gx:.2f}, {gy:.2f}) "
               f"-- the free space is not connected at this radius")
-        any_failed = True
+        any_failed |= fatal
+        holes_block_the_route |= not fatal
         continue
     length = sum(math.hypot(b[0] - a[0], b[1] - a[1])
                  for a, b in zip(path, path[1:])) * resolution
@@ -248,7 +260,76 @@ for label, passable in scenarios:
 passable = scenarios[0][1]
 
 # --- optionally hand it to the real message type -------------------------
+def pin_dds_to_a_multicast_interface():
+    """Point FastDDS at an interface that can actually carry discovery.
+
+    WSL2 in mirrored networking mode gives its `lo` no MULTICAST flag, so DDS
+    discovery over loopback cannot work -- and ROS_LOCALHOST_ONLY=1, the usual
+    advice, forces it there and makes it worse. Every node starts cleanly, logs
+    nothing, and none of them see each other. `nav2_check.sh` already carries
+    this workaround; without it here, `--ros` reports "no subscriber ever
+    received it" and looks like a bug in the grid.
+
+    A /32 is skipped: tunnel interfaces (Tailscale and friends) carry the
+    MULTICAST flag too, and a participant that announces itself there is
+    unreachable. Returns the address pinned, or None if nothing was changed.
+    """
+    if os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE"):
+        return None  # someone already chose; do not second-guess them
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        links = subprocess.run(["ip", "-o", "link", "show"], capture_output=True,
+                               text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    address = None
+    for line in links.splitlines():
+        if "MULTICAST" not in line or ":" not in line:
+            continue
+        name = line.split(":")[1].strip().split("@")[0]
+        try:
+            addrs = subprocess.run(
+                ["ip", "-o", "-4", "addr", "show", "dev", name, "scope", "global"],
+                capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        for entry in addrs.split():
+            if "/" in entry and entry.count(".") == 3 and not entry.endswith("/32"):
+                address = entry.split("/")[0]
+                break
+        if address:
+            break
+    if not address:
+        return None
+
+    profile = os.path.join(tempfile.gettempdir(), "fastdds_navmap_check.xml")
+    with open(profile, "w", encoding="utf-8") as fh:
+        fh.write(
+            "<?xml version='1.0' encoding='UTF-8' ?>"
+            "<dds><profiles xmlns='http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles'>"
+            "<transport_descriptors><transport_descriptor>"
+            "<transport_id>udp_mcast</transport_id><type>UDPv4</type>"
+            f"<interfaceWhiteList><address>{address}</address></interfaceWhiteList>"
+            "</transport_descriptor></transport_descriptors>"
+            "<participant profile_name='mcast_iface' is_default_profile='true'><rtps>"
+            "<userTransports><transport_id>udp_mcast</transport_id></userTransports>"
+            "<useBuiltinTransports>false</useBuiltinTransports>"
+            "</rtps></participant></profiles></dds>"
+        )
+    os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = profile
+    os.environ.pop("ROS_LOCALHOST_ONLY", None)
+    return address
+
+
 if args.ros:
+    # Before rclpy: FastDDS reads the profile path when it builds a participant,
+    # and rclpy.init() builds one.
+    pinned = pin_dds_to_a_multicast_interface()
+    if pinned:
+        print(f"pinned DDS to {pinned} (loopback carries no MULTICAST here)")
+
     import rclpy
     from nav_msgs.msg import OccupancyGrid
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -310,6 +391,12 @@ if args.ros:
     rclpy.shutdown()
 
 if any_failed:
-    print("\n[!] the map loads correctly, but the free space is not connected at every radius above")
+    print("\n[!] the map loads, but the obstacles alone leave no route across it")
     raise SystemExit(1)
+if holes_block_the_route:
+    print()
+    print("[note] treating the unmapped cells as obstacles too leaves no route. "
+          "That is the reconstruction's holes, not the map's geometry: nav2 "
+          "inflates lethal obstacles and leaves unknown space alone, so its "
+          "planner still crosses this. Worth watching, not a failure.")
 print("\n[ok] the map loads under map_server's rules and a planner can cross it")
