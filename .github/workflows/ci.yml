@@ -55,6 +55,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest numpy scipy scikit-image trimesh fastapi python-multipart usd-core
 
+      # `scripts/isaac-sim/test_navmap.py` needs neither OpenUSD nor Isaac Sim:
+      # `navmap` is the map reading and the planner that `check_navmap.py` and
+      # `navigate.py` share, so it is the piece where a change quietly makes the
+      # checked map and the driven map two different things. numpy and Pillow
+      # are all it wants.
+      #
       # `usd-core` is in that list on purpose. Without it the seven tests that
       # open an exported stage skipped here, every run, and they are the ones
       # guarding the mistakes this project has actually made -- the floor
@@ -87,4 +93,5 @@ jobs:
             backend/test_walkable.py \
             backend/test_reconstruction_jobs.py \
             backend/test_unload.py \
-            scripts/usd-export/test_export.py
+            scripts/usd-export/test_export.py \
+            scripts/isaac-sim/test_navmap.py

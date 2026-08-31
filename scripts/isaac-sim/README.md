@@ -689,8 +689,8 @@ raycast grid is the one that is checked.
 
 - No despeckle, and this one is a decision rather than an omission.
   `build_walkable.py` closes pinholes and drops specks before it floods. Doing
-  the same here was measured and rejected: `marble-office` has 3 obstacle blobs
-  of one or two cells and `marble-from-photo-7y19ti` has 11, and at 5 cm a
+  the same here was measured and rejected: `marble-office` has 4 obstacle blobs
+  of one or two cells and `marble-from-photo-7y19ti` has 6, and at 5 cm a
   single occupied cell is exactly the width of a chair leg. Nothing in the grid
   separates the two, and the mistakes are not symmetric — keeping a speck costs
   a slightly tighter map, removing a real leg costs a collision. Each run now
@@ -702,8 +702,18 @@ raycast grid is the one that is checked.
 - The floor/obstacle split is a single height threshold, and it is looser than
   `--floor-tolerance` makes it sound: the reference is the *highest* vertex of
   the floor mesh, so on `marble-office` the band ends 0.49 m above a floor whose
-  median is 4 mm. Measured rather than assumed — see the section below — and
-  worth 0.2 m² of over-claimed floor, with `--max-step` available to remove it.
+  median is 4 mm. The clearance ray no longer shares that reference, which is
+  what made it safe, but the classification still does, so the ground recorded
+  under free cells still reaches 0.473 m. `--max-step` is what turns the
+  difference between two such cells into an obstacle.
+- **Nothing here localises.** `navigate.py` reads the robot's pose from the
+  simulator, so this measures whether the *map* is drivable, not whether a robot
+  could work out where it is on it. Adding AMCL or a lidar to close that half is
+  a separate question, and its answer does not change any number above.
+- Only Spot has been driven. Of the four shipped policies `walk_robot.py`
+  measured H1 upright but slow, ANYmal and Spot walking, and Go2 never standing
+  at all. `--robot` accepts the others and nothing in the controller is
+  Spot-specific, but nothing has been measured either.
 
 ## Reachability and inflation, measured
 
