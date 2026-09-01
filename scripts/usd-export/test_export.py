@@ -12,10 +12,15 @@ Run:
 
 from __future__ import annotations
 
+import atexit
+import json
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -46,10 +51,98 @@ def find_fixture_world() -> str | None:
     return None
 
 
+def build_synthetic_room(root: Path, slug: str) -> str | None:
+    """A world tree with a real collision mesh, for a machine that has no world.
+
+    Generated worlds are local data and are not checked in, so every CI run had
+    `FIXTURE_WORLD is None` and skipped the seven tests that open an exported
+    stage -- exactly the ones guarding the mistakes this project has actually
+    made: the floor drifting off zero, the ground plane picking up an offset it
+    must not have, the height failing to move to Z. They only ever ran on the
+    one laptop that had generated a world.
+
+    The room is a box 3 m tall, subdivided until it carries enough vertices to
+    satisfy the same assertions a real collider does. Its `ground_plane_offset`
+    is measured from the mesh on disk rather than assumed, so the test still
+    checks what it always checked -- that the exporter applies the offset with
+    the right sign, on the right prim, after the flip -- without depending on
+    trimesh keeping glTF's axes on a round trip.
+    """
+    try:
+        import trimesh
+    except ImportError:
+        return None
+
+    room = trimesh.creation.box(extents=(4.0, 3.0, 5.0))
+    room.apply_translation((0.0, 1.5, 0.0))  # floor on y=0, ceiling on y=3
+    while len(room.vertices) < 1200:  # test_collider_is_present_and_collidable
+        room = room.subdivide()
+
+    world_dir = root / slug / "output" / "world"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    glb = world_dir / "0-world.glb"
+    room.export(glb)
+
+    reloaded = trimesh.load(glb, process=False)
+    ceiling = float(reloaded.bounds[1][1])
+    # flip_y turns the room over: y -> -y, so its lowest point lands at -ceiling
+    # and the offset that puts the floor back on zero is the ceiling height.
+    (world_dir / "0-world-500k.spz").write_bytes(b"")  # found, never opened
+    (world_dir / "0-world.json").write_text(
+        json.dumps({
+            "display_name": "Synthetic Room",
+            "assets": {"splats": {"semantics_metadata": {
+                "flip_y": True,
+                "metric_scale_factor": 1.0,
+                "ground_plane_offset": ceiling,
+            }}},
+        }),
+        encoding="utf-8",
+    )
+    return slug
+
+
 FIXTURE_WORLD = find_fixture_world()
+SYNTHETIC_ROOT: Path | None = None
+if FIXTURE_WORLD is None:
+    SYNTHETIC_ROOT = Path(tempfile.mkdtemp(prefix="imageworld-usd-test-"))
+    FIXTURE_WORLD = build_synthetic_room(SYNTHETIC_ROOT, "synthetic-room")
+    if FIXTURE_WORLD is None:
+        shutil.rmtree(SYNTHETIC_ROOT, ignore_errors=True)
+        SYNTHETIC_ROOT = None
+    else:
+        atexit.register(shutil.rmtree, SYNTHETIC_ROOT, True)
+        # In-process lookups (resolve_world) read this; the export subprocess is
+        # told through IMAGEWORLD_WORLDS_DIR in run_export().
+        exporter.WORLDS_DIR = SYNTHETIC_ROOT
+
+def missing_exporter_dependencies() -> list[str]:
+    """What the exporter would refuse to start without, in this interpreter.
+
+    The stage tests re-run the exporter through `sys.executable`, so the answer
+    has to be about this interpreter and about the exporter's whole list -- not
+    just OpenUSD. Checking only `pxr` was enough to turn six clean skips into
+    six errors on a machine that had OpenUSD and nothing else.
+    """
+    missing = []
+    for module, hint in exporter.REQUIRED_MODULES:
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(hint)
+    return missing
+
+
+MISSING_DEPENDENCIES = missing_exporter_dependencies()
+
+# Two separate reasons to skip, and both are worth naming. CI has no generated
+# worlds -- they are local data -- and not the exporter's heavy dependencies,
+# because the contract tests that matter most there read TypeScript source and
+# need neither.
 needs_world = pytest.mark.skipif(
-    FIXTURE_WORLD is None,
-    reason="no generated world with a collision mesh in public/worlds/",
+    FIXTURE_WORLD is None or bool(MISSING_DEPENDENCIES),
+    reason=(f"needs a generated world in public/worlds/ (have: {FIXTURE_WORLD}) and "
+            f"pip install {' '.join(MISSING_DEPENDENCIES) or '-r scripts/usd-export/requirements.txt'}"),
 )
 
 
@@ -74,50 +167,114 @@ def assert_contains(source: str, pattern: str, what: str, owner: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_splat_transform_contract():
-    """build_stage() authors translate(offset) . rotateX(180) . scale(factor)."""
-    source = read_source("modules/splat/SplatRenderer.tsx")
+def test_placement_contract():
+    """`worldTransform()` is the placement, and `build_stage()` mirrors it.
+
+    This used to grep the two components for the arithmetic written inline in
+    each. The arithmetic moved into one shared helper, both greps stopped
+    matching, and the drift these tests exist to catch happened underneath
+    them: the TypeScript grew a `rotationX` override for Z-up Nerfstudio worlds
+    and the exporter kept reading only `flip_y`. Watch the single source
+    instead.
+    """
+    source = read_source("modules/collider/worldTransform.ts")
     assert_contains(
         source,
-        r"position=\{\[0,\s*groundPlaneOffset,\s*0\]\}",
-        "Splat ground offset",
-        "SplatRenderer.tsx",
+        r"rotation: \[rotationX \?\? \(flipY \? Math\.PI : 0\), 0, 0\]",
+        "Background rotation (X axis; explicit rotationX wins over flipY)",
+        "worldTransform.ts",
     )
     assert_contains(
         source,
-        r"rotation=\{\[flipY\s*\?\s*Math\.PI\s*:\s*0,\s*0,\s*0\]\}",
-        "Splat flip-Y rotation (X axis, 180 degrees)",
-        "SplatRenderer.tsx",
+        r"position: \[0, groundPlaneOffset \?\? 0, 0\]",
+        "Background ground offset",
+        "worldTransform.ts",
     )
     assert_contains(
         source,
-        r"scale=\{metricScaleFactor\}",
-        "Splat metric scale",
-        "SplatRenderer.tsx",
+        r"const scale = metricScaleFactor \?\? 1",
+        "Background metric scale default",
+        "worldTransform.ts",
+    )
+    assert_contains(
+        source,
+        r"scale: \[scale, scale, scale\]",
+        "Background metric scale, uniform on all three axes",
+        "worldTransform.ts",
     )
 
 
-def test_collider_shares_the_splat_transform():
-    """The exported Collider sits under the same /World/Background Xform."""
-    source = read_source("modules/collider/WorldCollider.tsx")
-    assert_contains(
-        source,
-        r"const normalizedRotation = flipY \? Math\.PI : 0",
-        "Collider flip-Y rotation",
-        "WorldCollider.tsx",
+def test_both_renderers_use_the_shared_transform():
+    """Neither component may go back to computing the placement itself.
+
+    The exporter mirrors one function. If a component stops calling it, the
+    exporter is mirroring something that no longer governs what the viewer
+    draws -- and the splat and the collider can drift apart from each other
+    too, which is silent: walking still works, the collider is just somewhere
+    the splat is not.
+    """
+    for relative in ("modules/splat/SplatRenderer.tsx", "modules/collider/WorldCollider.tsx"):
+        assert_contains(
+            read_source(relative),
+            r"worldTransform\(\{",
+            "Shared placement helper",
+            relative,
+        )
+
+
+def test_background_rotation_mirrors_the_typescript():
+    """The exporter's half of the contract above, exercised directly."""
+    assert exporter.background_rotation_degrees(True, None) == 180.0
+    assert exporter.background_rotation_degrees(False, None) == 0.0
+    # Nerfstudio: Z-up, arrives as flip_y=False with rotation_x=-pi/2.
+    assert exporter.background_rotation_degrees(False, -math.pi / 2) == pytest.approx(-90.0)
+    # An explicit rotation wins even when flip_y would say otherwise ...
+    assert exporter.background_rotation_degrees(True, -math.pi / 2) == pytest.approx(-90.0)
+    # ... including an explicit zero, which `??` keeps and a truth test loses.
+    assert exporter.background_rotation_degrees(True, 0.0) == 0.0
+
+
+def _synthetic_world(root, slug, semantics):
+    """The least on disk that `resolve_world` will accept.
+
+    It never opens the splat, only finds it, so an empty file is enough. This
+    exists because no world in `public/worlds` carries `rotation_x` -- the ones
+    that would are video reconstructions, which are not checked in -- and the
+    path from `semantics_metadata` to the exporter's field had no test at all.
+    """
+    world_dir = root / slug / "output" / "world"
+    world_dir.mkdir(parents=True)
+    (world_dir / "0-world-500k.spz").write_bytes(b"")
+    (world_dir / "0-world.json").write_text(
+        json.dumps({"assets": {"splats": {"semantics_metadata": semantics}}}),
+        encoding="utf-8",
     )
-    assert_contains(
-        source,
-        r"rotation=\{\[normalizedRotation,\s*0,\s*0\]\}",
-        "Collider rotation axis",
-        "WorldCollider.tsx",
+    return root
+
+
+def test_resolve_world_reads_rotation_x(tmp_path, monkeypatch):
+    """A Nerfstudio world arrives as flip_y false plus an explicit rotation."""
+    monkeypatch.setattr(
+        exporter, "WORLDS_DIR",
+        _synthetic_world(tmp_path, "zup", {"flip_y": False, "rotation_x": -math.pi / 2}),
     )
-    assert_contains(
-        source,
-        r"position=\{\[0,\s*normalizedGroundPlaneOffset,\s*0\]\}",
-        "Collider ground offset",
-        "WorldCollider.tsx",
+    world = exporter.resolve_world("zup", "500k")
+    assert world.flip_y is False
+    assert world.rotation_x == pytest.approx(-math.pi / 2)
+    # The value the exporter would actually author on /World/Background.
+    assert exporter.background_rotation_degrees(
+        world.flip_y, world.rotation_x
+    ) == pytest.approx(-90.0)
+
+
+def test_resolve_world_without_rotation_x_falls_back_to_flip_y(tmp_path, monkeypatch):
+    """A Marble world says nothing about rotation, and must keep the old 180."""
+    monkeypatch.setattr(
+        exporter, "WORLDS_DIR", _synthetic_world(tmp_path, "marble", {"flip_y": True}),
     )
+    world = exporter.resolve_world("marble", "500k")
+    assert world.rotation_x is None
+    assert exporter.background_rotation_degrees(world.flip_y, world.rotation_x) == 180.0
 
 
 def test_sun_direction_contract():
@@ -200,6 +357,9 @@ def test_sun_direction_values(rotation, expected):
 
 def run_export(tmp_path: Path, *flags: str) -> Path:
     out = tmp_path / "world.usda"
+    environment = dict(os.environ)
+    if SYNTHETIC_ROOT is not None:
+        environment["IMAGEWORLD_WORLDS_DIR"] = str(SYNTHETIC_ROOT)
     result = subprocess.run(
         [
             sys.executable,
@@ -214,6 +374,7 @@ def run_export(tmp_path: Path, *flags: str) -> Path:
         ],
         capture_output=True,
         text=True,
+        env=environment,
     )
     assert result.returncode == 0, f"export failed:\n{result.stdout}\n{result.stderr}"
     stage_path = out.parent / "bundle" / "world.usda"
@@ -284,8 +445,44 @@ def test_collider_is_present_and_collidable(y_up_stage):
 
 
 @needs_world
+def test_collider_meshes_state_their_approximation(y_up_stage):
+    """Every collision mesh must ask for the triangle mesh in writing.
+
+    Left unauthored it works by schema default, and that default is doing real
+    work: a convex hull would swallow the doorways, the gaps under furniture
+    and the holes the reconstruction left, and the navigation map built from
+    PhysX raycasts would come back as one solid block of floor. Relying on a
+    default for that is not the same as asking for it.
+    """
+    from pxr import UsdGeom, UsdPhysics
+
+    collider = y_up_stage.GetPrimAtPath("/World/Background/Collider")
+    meshes = [p for p in iter_descendants(collider) if p.IsA(UsdGeom.Mesh)]
+    assert meshes, "collider has no mesh geometry"
+    for mesh in meshes:
+        assert mesh.HasAPI(UsdPhysics.MeshCollisionAPI), (
+            f"{mesh.GetPath()} carries no MeshCollisionAPI"
+        )
+        approximation = UsdPhysics.MeshCollisionAPI(mesh).GetApproximationAttr().Get()
+        assert approximation == UsdPhysics.Tokens.none, (
+            f"{mesh.GetPath()} would be cooked as '{approximation}', not the source mesh"
+        )
+    # A triangle mesh can only be static. If the background ever becomes a rigid
+    # body, PhysX quietly swaps in a convex hull and the map goes solid.
+    assert not collider.HasAPI(UsdPhysics.RigidBodyAPI), (
+        "a rigid-body background would force PhysX off the triangle mesh"
+    )
+
+
+@needs_world
 def test_floor_sits_near_origin(y_up_stage):
-    """home-room uses the manifest's calibrated offset, so the floor lands at 0."""
+    """The manifest's calibrated offset must land the floor on zero.
+
+    Sign and order both matter and neither is visible in the viewer: the offset
+    is applied after the flip, and it belongs to the background alone. It once
+    went onto the ground plane as well, which put an invisible floor a metre
+    above the real one and every dropped rigid body on top of it.
+    """
     from pxr import Usd, UsdGeom
 
     bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
@@ -310,10 +507,23 @@ def test_z_up_moves_height_to_z(z_up_stage):
 
 
 @needs_world
-def test_ground_plane_follows_offset(y_up_stage):
-    from pxr import UsdGeom, UsdPhysics
+def test_ground_plane_sits_at_the_origin(y_up_stage):
+    """The plane must coincide with the floor, which the background already puts at 0.
+
+    It used to carry `groundPlaneOffset` as well, which raised it a metre above
+    the floor. Harmless in the viewer, which never uses it for anything the eye
+    can see; in Isaac Sim every rigid body landed on it instead of on the room.
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
 
     ground = y_up_stage.GetPrimAtPath("/World/GroundPlane")
     assert ground.IsValid()
     assert ground.HasAPI(UsdPhysics.CollisionAPI)
     assert UsdGeom.Plane(ground).GetAxisAttr().Get() == UsdGeom.Tokens.y
+
+    height = (
+        UsdGeom.Xformable(ground)
+        .ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        .ExtractTranslation()[1]
+    )
+    assert abs(height) < 1e-6, f"ground plane sits at {height:.3f} m, not on the floor"

@@ -53,8 +53,30 @@ jobs:
       - name: Install CPU test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest numpy scipy scikit-image trimesh fastapi python-multipart
+          python -m pip install pytest numpy scipy scikit-image trimesh fastapi python-multipart usd-core
 
+      # `scripts/isaac-sim/test_navmap.py` needs neither OpenUSD nor Isaac Sim:
+      # `navmap` is the map reading and the planner that `check_navmap.py` and
+      # `navigate.py` share, so it is the piece where a change quietly makes the
+      # checked map and the driven map two different things. numpy and Pillow
+      # are all it wants.
+      #
+      # `usd-core` is in that list on purpose. Without it the seven tests that
+      # open an exported stage skipped here, every run, and they are the ones
+      # guarding the mistakes this project has actually made -- the floor
+      # drifting off zero, the ground plane picking up an offset it must not
+      # have, the room height not moving to Z. They need OpenUSD and a world;
+      # OpenUSD is a wheel, and the world the suite now builds for itself.
+      #
+      # `scripts/usd-export/test_export.py` is here because half of it guards
+      # the USD exporter against drifting from the TypeScript runtime it
+      # re-implements -- and that guard had already gone quiet once. The tests
+      # grepped the components for arithmetic that later moved into a shared
+      # helper, both greps stopped matching, and the drift they existed to
+      # catch then happened underneath them. Nothing noticed, because nothing
+      # ran them. Its stage-building tests need OpenUSD and a world, and now
+      # have both here; the contract tests need neither and never did.
+      #
       # Three suites are not run here, and it is worth being explicit about it:
       #   test_backend.py    -- an environment smoke script, not tests; imports torch.
       #   test_client.py     -- drives a live server on localhost:8000.
@@ -70,4 +92,6 @@ jobs:
             backend/test_props.py \
             backend/test_walkable.py \
             backend/test_reconstruction_jobs.py \
-            backend/test_unload.py
+            backend/test_unload.py \
+            scripts/usd-export/test_export.py \
+            scripts/isaac-sim/test_navmap.py

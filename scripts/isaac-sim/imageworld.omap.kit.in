@@ -1,0 +1,59 @@
+[package]
+title = "ImageWorld occupancy check"
+description = "Kit app with physics and the occupancy-map generator, and no RTX renderer"
+version = "1.0.0"
+keywords = ["experience", "app", "isaacsim"]
+
+# The stock isaacsim.exp.base experience pulls in omni.hydra.rtx, and on this
+# machine rtx.scenedb.plugin.dll faults during startup before any stage loads.
+# The occupancy-map generator raycasts through PhysX and never renders, so the
+# renderer is simply left out rather than worked around.
+[dependencies]
+"omni.kit.async_engine" = {}
+"omni.usd" = {}
+"omni.usd.libs" = {}
+"omni.timeline" = {}
+"omni.physx" = {}
+"omni.physx.cooking" = {}
+"isaacsim.asset.gen.omap" = {}
+# SimulationApp.__init__ imports omni.kit.usd.layers unconditionally.
+"omni.kit.usd.layers" = {}
+"isaacsim.core.deprecation_manager" = {}
+"omni.kit.pip_archive" = {}
+"omni.kit.loop-isaac" = {}
+
+[settings.app]
+name = "ImageWorld Occupancy"
+version = "1.0.0"
+settings.persistent = false
+useFabricSceneDelegate = false
+fastShutdown = true
+installSignalHandlers = 0
+
+# Absolute, because this .kit lives outside the Isaac Sim tree -- ${app} would
+# resolve to wherever the script sits and find no extensions at all.
+#
+# @ISAAC_PATH@ is substituted by build_navmap.py from the ISAAC_PATH the running
+# interpreter was launched with. Hardcoding one install silently sends a run
+# under a second Isaac Sim version off to the first one's extensions.
+[settings.app.exts.folders]
+'++' = [
+    "@ISAAC_PATH@/apps",
+    "@ISAAC_PATH@/exts",
+    "@ISAAC_PATH@/extscache",
+    "@ISAAC_PATH@/extsUser",
+    "@ISAAC_PATH@/extsDeprecated",
+]
+
+[settings.app.window]
+enabled = false
+
+[settings.renderer]
+enabled = false
+active = ""
+
+[settings.app.runLoops.main]
+rateLimitEnabled = false
+
+[settings.exts."omni.kit.registry.nucleus"]
+registries = []

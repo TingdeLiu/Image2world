@@ -29,12 +29,36 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORLDS_DIR = REPO_ROOT / "public" / "worlds"
+# Overridable so a world tree can live somewhere else -- another disk, or the
+# throwaway one `test_export.py` builds when the repo carries no generated
+# worlds, which is every CI run. Generated worlds are local data and are not
+# checked in, so without this the stage tests could only ever run on a machine
+# that had already made one.
+WORLDS_DIR = Path(os.environ.get("IMAGEWORLD_WORLDS_DIR") or REPO_ROOT / "public" / "worlds")
 LOD_CHOICES = ("100k", "150k", "500k", "full_res")
 SPLAT_EXTENSIONS = (".ply", ".spz")
 
 # The viewer's defaults, mirrored from src/components/WorldViewer.tsx.
 DEFAULT_SEMANTICS = {"metric_scale_factor": 1.0, "ground_plane_offset": 0.0, "flip_y": True}
+
+
+def background_rotation_degrees(flip_y: bool, rotation_x: float | None) -> float:
+    """Mirror of the rotation line in src/modules/collider/worldTransform.ts.
+
+        rotation: [rotationX ?? (flipY ? Math.PI : 0), 0, 0]
+
+    `??` falls back on null/undefined only, so an explicit `rotation_x` of 0 has
+    to win over `flip_y` -- hence `is not None` rather than a truth test. The
+    viewer has its own test pinning that exact case.
+
+    Nerfstudio worlds are the reason this exists: they are Z-up, and arrive with
+    `flip_y: false` and `rotation_x: -pi/2`. Read only `flip_y`, and they export
+    with no rotation at all -- lying on one side, with a wall where the floor
+    should be, which a navigation map then happily grids.
+    """
+    if rotation_x is not None:
+        return math.degrees(rotation_x)
+    return 180.0 if flip_y else 0.0
 
 
 def fail(message: str) -> NoReturn:
@@ -63,15 +87,33 @@ def remove_tree(path: Path, attempts: int = 5) -> None:
             time.sleep(0.2 * (attempt + 1))
 
 
-def require_dependencies() -> None:
-    if sys.version_info < (3, 11) or sys.version_info >= (3, 13):
+# Named rather than inlined into the check below, so `test_export.py` can skip
+# on exactly the same list instead of keeping its own copy. It kept its own for
+# a while, checked only `pxr`, and an interpreter with OpenUSD but no trimesh
+# turned six skips into six errors.
+REQUIRED_MODULES = (
+    ("pxr", "usd-core"),
+    ("trimesh", "trimesh"),
+)
+
+# Only the splat needs these, and the splat is optional. `usd_convert_gsplat` is
+# imported where it is used, deep inside write_splat_layer(); the check up front
+# was demanding it -- and the 3.11-3.12 interpreter it needs -- from every
+# export, including `--no-splat` runs that never touch it. That is the whole
+# collider and physics path, gated on a dependency it does not use.
+SPLAT_MODULES = (("usd_convert_gsplat", "usd-convert-gsplat[usd]"),)
+
+
+def require_dependencies(*, need_splat: bool = True) -> None:
+    if need_splat and (sys.version_info < (3, 11) or sys.version_info >= (3, 13)):
         fail(
             f"Python {sys.version_info.major}.{sys.version_info.minor} is unsupported. "
             "usd-convert-gsplat requires >=3.11,<3.13; create a separate venv "
-            "(see scripts/usd-export/README.md)."
+            "(see scripts/usd-export/README.md), or pass --no-splat, which does "
+            "not need it."
         )
     missing = []
-    for module, hint in (("pxr", "usd-core"), ("usd_convert_gsplat", "usd-convert-gsplat[usd]"), ("trimesh", "trimesh")):
+    for module, hint in REQUIRED_MODULES + (SPLAT_MODULES if need_splat else ()):
         try:
             __import__(module)
         except ImportError:
@@ -135,6 +177,7 @@ class WorldSource:
     splat_lod: str
     collider_path: Path | None
     flip_y: bool
+    rotation_x: float | None
     metric_scale_factor: float
     ground_plane_offset: float
     scene: dict[str, Any]
@@ -201,6 +244,10 @@ def resolve_world(slug: str, requested_lod: str) -> WorldSource:
         splat_lod=lod,
         collider_path=collider,
         flip_y=bool(semantics.get("flip_y", True)),
+        rotation_x=(
+            None if semantics.get("rotation_x") is None
+            else float(semantics["rotation_x"])
+        ),
         metric_scale_factor=metric_scale_factor,
         ground_plane_offset=ground_plane_offset,
         scene=scene,
@@ -442,6 +489,36 @@ def write_mesh_layer(glb_path: Path, out_path: Path, textures_dir: Path) -> bool
     return True
 
 
+def set_mesh_approximation(root: Any, approximation: Any) -> int:
+    """State how PhysX should cook every mesh under `root`, instead of implying it.
+
+    `UsdPhysics.CollisionAPI` on its own leaves the approximation unauthored, and
+    the schema default -- the full triangle mesh -- is what a static room needs:
+    the doorways, the gaps under furniture and the holes the reconstruction left
+    are all concavities, and every one of them disappears inside a convex hull.
+    The generated map is evidence that we get the triangle mesh today (a hull
+    would make the room solid, and the raycast grid finds 84 m2 of floor with
+    structure on it), but that is a default we are relying on rather than one we
+    asked for.
+
+    Note that a triangle mesh can only ever be static. Applying RigidBodyAPI here
+    would make PhysX silently fall back to a convex hull, which is exactly the
+    failure this makes visible.
+    """
+    from pxr import UsdGeom, UsdPhysics
+
+    applied = 0
+    stack = [root]
+    while stack:
+        prim = stack.pop()
+        stack.extend(prim.GetChildren())
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set(approximation)
+        applied += 1
+    return applied
+
+
 def apply_physics(prim: Any, physics: str) -> None:
     from pxr import UsdPhysics
 
@@ -491,10 +568,12 @@ def build_stage(
 
     # --- background -------------------------------------------------------
     background = UsdGeom.Xform.Define(stage, "/World/Background")
-    # Matches <group position={[0, offset, 0]} rotation={[flipY ? PI : 0, 0, 0]}
-    # scale={metricScaleFactor}> in src/modules/splat/SplatRenderer.tsx.
+    # Matches the transform both SplatRenderer.tsx and WorldCollider.tsx spread,
+    # built by worldTransform() in src/modules/collider/worldTransform.ts.
     background.AddTranslateOp().Set(Gf.Vec3d(0.0, world.ground_plane_offset, 0.0))
-    background.AddRotateXOp().Set(180.0 if world.flip_y else 0.0)
+    background.AddRotateXOp().Set(
+        background_rotation_degrees(world.flip_y, world.rotation_x)
+    )
     background.AddScaleOp().Set(Gf.Vec3f(*([world.metric_scale_factor] * 3)))
 
     if include_splat:
@@ -520,6 +599,7 @@ def build_stage(
                 from pxr import UsdPhysics
 
                 UsdPhysics.CollisionAPI.Apply(collider)
+                set_mesh_approximation(collider, UsdPhysics.Tokens.none)
 
     # --- foreground objects ----------------------------------------------
     if placements:
@@ -559,8 +639,14 @@ def build_stage(
         ground = UsdGeom.Plane.Define(stage, "/World/GroundPlane")
         ground.CreateAxisAttr(UsdGeom.Tokens.y)
         ground.CreatePurposeAttr(UsdGeom.Tokens.guide)
-        ground_xform = UsdGeom.Xformable(ground.GetPrim())
-        ground_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, world.ground_plane_offset, 0.0))
+        # The plane sits at the origin, with no offset. `groundPlaneOffset` is
+        # what lifts the *background* so its floor lands on y=0 -- applying it
+        # here as well would raise the plane by that much again, and the floor
+        # is already there. `GroundPlane.tsx` takes no position for the same
+        # reason; only `SplatRenderer.tsx` and `WorldCollider.tsx` use the
+        # offset. Getting this wrong is invisible in the viewer but not in a
+        # simulator: a robot spawned at the origin rests on an invisible plane
+        # a metre above the floor, and so does anything dropped into the scene.
         UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
 
     # --- sun --------------------------------------------------------------
@@ -641,7 +727,7 @@ def main() -> None:
     parser.add_argument("--keep-stage", action="store_true", help="Keep the intermediate .usda stage directory")
     args = parser.parse_args()
 
-    require_dependencies()
+    require_dependencies(need_splat=not args.no_splat)
 
     world = resolve_world(args.slug, args.lod)
     placements = [] if args.no_objects else resolve_placements(world)

@@ -78,6 +78,45 @@ The exporter warns if the scene floor does not land near the origin. That
 usually means `scene.json` overrode the calibrated `groundPlaneOffset` from the
 world manifest — worth fixing before spawning a robot at the origin.
 
+## Getting a PLY back out of an `.spz`
+
+`npm run assets:spz` compresses a splat so it is small enough to ship to a
+browser. `spz_to_ply.py` is the other direction, and exists because simulators
+want the uncompressed thing — Isaac Sim's neural renderer (`nrend`, the
+`3dgs-nrend` / `3dgut-nrend` backends behind NuRec) reads PLY, not SPZ.
+
+Marble worlds only ever carry `.spz` — the API returns nothing else — so for
+those this is the only way to get a PLY at all.
+
+```bash
+npm run assets:ply -- marble-office --lod 500k
+```
+
+Output lands beside the `.spz` as `<n>-world-<lod>.ply`. `worldsScanner` still
+serves the `.spz` to the viewer (`claimSplatLevel` ignores a `.ply` for a level
+a `.spz` already claimed), so this adds files without changing what the browser
+loads.
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--lod` | `500k` | `100k`, `150k`, `500k`, `full_res` |
+| `--out` | beside the `.spz` | override the output path |
+
+Round-trip checked field by field on `marble-office` 500k, not byte by byte —
+a 1-LSB change in a packed fixed-point field flips a whole byte, so a byte diff
+on quantised data means nothing:
+
+| Field | max abs difference |
+| --- | --- |
+| positions | 0 |
+| scales | 0 |
+| opacities | 0 |
+| f_dc | 0 |
+| rotations | 1.19e-7 |
+
+Only the quaternions move, by float32 epsilon. Marble splats are SH degree 0 at
+every LOD, so there are no `f_rest` coefficients to lose.
+
 ### Options
 
 | Flag | Default | Purpose |
