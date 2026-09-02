@@ -228,6 +228,30 @@ def test_a_fallen_robot_is_not_read_as_arrival():
 # --------------------------------------------------------------------------
 
 
+def test_a_map_that_did_not_build_stops_vln_reading_the_old_one():
+    """The stale-map trap, which `vln` would fall into exactly like `check` did.
+
+    A refused build leaves the previous run's map on disk, and a viewpoint graph
+    measured against that would be reported under this run's slug."""
+    assert "vln" in pipeline.skip_after_a_bad_map(rewrote=False)
+
+
+def test_a_fresh_map_that_is_merely_poor_is_still_measured():
+    """And the other half, which is why this is a function and not an `if`.
+
+    `multiview-meetingroom` writes 17.6 m2 of real floor that does not cover the
+    viewer's spawn. Skipping `vln` there loses the only description of what is
+    wrong with it -- 10 viewpoints in 6 components -- and leaves `unusable map`
+    standing on its own."""
+    assert "vln" not in pipeline.skip_after_a_bad_map(rewrote=True)
+    assert {"check", "nav2", "drive"} <= pipeline.skip_after_a_bad_map(rewrote=True)
+
+
+def test_the_stages_a_bad_map_stops_are_all_real_stages():
+    for rewrote in (True, False):
+        assert pipeline.skip_after_a_bad_map(rewrote) <= set(pipeline.STAGES)
+
+
 def test_every_stage_name_is_known_to_the_skip_flag():
     """`--skip` validates against this tuple, so a stage missing from it could
     never be skipped and a typo in it would silently skip nothing."""

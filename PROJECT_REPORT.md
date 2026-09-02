@@ -2633,13 +2633,20 @@ R2R / RxR 意义下的 VLN 不在栅格上动作。智能体站在一个**视点
 | `family-splatfacto-integration-jpjwgt` | 0.0 | **0** | _0.00_ | _0.00_ | 0.0% | _0_ | nodes |
 | `marble-from-photo-7y19ti` | 9.6 | **9** | **0.86** | _1.16_ | 8.3% | _0_ | nodes, coverage |
 | `marble-office` | 49.0 | 74 | 0.96 | **1.03** | 0.4% | 100 | detour_p90 |
-| `multiview-meetingroom` | 0.0 | **0** | _0.00_ | _0.00_ | 0.0% | _0_ | nodes |
+| `multiview-meetingroom` | 12.5 | **10** | **0.78** | _1.00_ | 0.0% | _0_ | nodes, largest_fraction, coverage |
 | `room1-cbti0t` | 0.8 | **1** | **0.89** | _0.00_ | 0.0% | _0_ | nodes, coverage |
 | `singleview-meetingroom` | 0.0 | **0** | _0.00_ | _0.00_ | 0.0% | _0_ | nodes |
 | `sunlit-office-k7hil8` | 2.8 | **4** | **0.87** | _1.00_ | 0.0% | _0_ | nodes, coverage |
 
-粗体是判定不合格，斜体是门禁**拒绝下结论**的项。0.0 m² 那三个是 collider 未分类、
+粗体是判定不合格，斜体是门禁**拒绝下结论**的项。0.0 m² 那两个是 collider 未分类、
 `build_navmap.py` 直接拒绝的世界，盘上留的是更早一次构建的产物。
+
+`multiview-meetingroom` 能上表，是因为跑了
+`python backend/tools/build_collider.py multiview-meetingroom`：它把 collider 分
+类，`build_navmap.py` 就不再拒绝，一个原本什么也产不出的世界现在产出 12.5 m²。
+另外两个需要的是同一条命令。这也是本轮尝试过的办法里唯一真正推动了一个世界
+的一步——按人高智能体重建地图（`--robot-height 1.5`，R2R 相机约在 1.5 m）只让
+`marble-office` 的地板变了 0.1 m²、图上少了一条边，因为那个厅在任何高度都是空的。
 
 **一个都不合格，而且跑得最远的两个是因为相反的原因栽的。** `marble-office` 规模够了——74
 个视点、96% 覆盖、100 条 episode——却**空得不需要导航**：2628 个视点对里只有 0.4% 需要绕
@@ -2695,6 +2702,26 @@ R2R / RxR 意义下的 VLN 不在栅格上动作。智能体站在一个**视点
 改法是从外边界对 unknown 做 flood fill：淹得到的是外部，淹不到的才是被已测格子围住的洞。
 重建 demo-office 验证：围住 222 格、外部 26292 格，与另写一份、直接读已提交 PNG 的独立
 flood fill **完全一致**；PNG 与 YAML 逐字节不变——这正是重点，改的是报表，不是地图。
+
+### 一个做了又撤掉的功能
+
+`multiview-meetingroom` 的地板碎成 **298 个区域**，flood 保留 17.6 m²、丢弃
+**21.1 m²**——丢的比留的还多。而 `docs/ISAAC_SIM.md` 里早就写着一条已知局限：这里
+没有 despeckle。两件事对上了，我于是给 `build_navmap.py` 加了 `--bridge-specks`：让
+reachability 的 flood 能跨过孤立的小障碍物 blob（它们在地图里仍是障碍物，只影
+响连通性），沿用 `build_walkable.py` 已有的“闭运算只用于连通、再与原图求交”结构。
+
+**测下来：什么也没发生。** 阈值 0 / 2 / 4 三档，kept 都是 7059 格。直接去量“到底是
+什么在隔开这些区域”，答案很干脆：被孤立区域的边界有 **77% 是 unknown 而非障碍
+物**，297 块里 108 块**只**被 unknown 包围（四周根本没地板的孤岛），159 块只有一个
+格。它们被丢弃是**对的**。
+
+所以这个功能建立在一个被我自己证伪的假设上，并且在唯一能验证它的数据上没有任何
+可测效果。**已撤销**，只把这个负结果写进那条局限里——它把“despeckle 缺失”从一条
+可疑的待办项，变成了一条在最该疼的世界上量过、确认不疼的结论。
+
+顺带一个操作教训：扫描阈值时我在后台任务还在跑的过程中改了那个脚本，最后一档
+跑的已经是新代码，不可比。结论未受影响（前三档一致），但那一行数据是废的。
 
 ### 结论
 

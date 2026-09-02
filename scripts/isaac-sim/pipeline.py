@@ -222,6 +222,10 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
     was = os.path.getmtime(yaml) if os.path.isfile(yaml) else None
     stage = add("map", [isaac or "python", os.path.join(HERE, "build_navmap.py"),
                         usdz, "--out", export_dir], env=foreign_python_env())
+    # Whether this run wrote the map now on disk, which is a different question
+    # from whether that map is any good. Both end the stage red, and only the
+    # first is a reason to stop reading the file.
+    rewrote = False
     if stage:
         stage.pick(SAYS["probe"], "box", "box_only")
         stage.pick(SAYS["cells"], "free", "free_m2", "occupied")
@@ -233,6 +237,7 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
         elif stage.status == "ok" and was is not None and os.path.getmtime(yaml) == was:
             stage.status = "exited 0 without rewriting the map -- see its output"
         elif stage.status == "ok":
+            rewrote = True
             stage.status = map_is_usable(os.path.join(export_dir, slug + "-navmap.json"),
                                          stage.notes)
         if stage.status != "ok":
@@ -242,9 +247,13 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
             # green against a map built an hour earlier under different code.
             # `--skip map` is deliberately not affected -- re-checking an
             # existing map is what that flag is for.
-            skip = skip | {"check", "vln", "nav2", "drive"}
-            print(f"  .. the map did not build, so check/nav2/drive are not run "
-                  f"against the {slug} map that was already on disk")
+            skip = skip | skip_after_a_bad_map(rewrote)
+            if rewrote:
+                print(f"  .. the {slug} map is this run's but not one to drive, so "
+                      f"check/nav2/drive are skipped and vln still reports on it")
+            else:
+                print(f"  .. the map did not build, so check/vln/nav2/drive are not "
+                      f"run against the {slug} map that was already on disk")
 
     stage = add("check", [sys.executable, os.path.join(HERE, "check_navmap.py"), yaml])
     if stage:
@@ -304,6 +313,24 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
                             "-- the map is too small for the goal to mean anything")
 
     return stages
+
+
+def skip_after_a_bad_map(rewrote):
+    """Which stages must not run once the `map` stage has gone red.
+
+    Two different reds. If the build did not write a map, everything downstream
+    would read whatever a previous run left on disk -- measured:
+    `singleview-meetingroom` reported `map:XX check:ok`, the check green against
+    a map built an hour earlier under different code.
+
+    If it did write one and the map is merely poor, that file is this run's, and
+    `vln` is the stage whose entire job is to say how a map falls short.
+    `multiview-meetingroom` writes 17.6 m2 of real floor that does not happen to
+    cover where the viewer spawns; "unusable map" alone does not tell you that
+    it is in 6 pieces with 10 viewpoints between them.
+    """
+    always = {"check", "nav2", "drive"}
+    return always if rewrote else always | {"vln"}
 
 
 def map_is_usable(report_path, notes):
