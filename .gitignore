@@ -83,6 +83,15 @@ __pycache__/
 !/public/worlds/demo-office/
 !/public/worlds/demo-office/**
 
+# ... but not the parts of its export that regenerate. `pipeline.py` writes
+# these, and two of the three are cheap to make again: the .usdz rebuilds from
+# the tracked GLB in about a second, and the driving overlay needs Isaac Sim to
+# mean anything at all. The navmap trio stays, and earns its few kilobytes --
+# with it in the tree a fresh clone can run `check_navmap.py` and the nav2 check
+# against a real map, with no GPU, no Isaac Sim and no API key.
+/public/worlds/demo-office/export/*.usdz
+/public/worlds/demo-office/export/*-navigate.*
+
 # `build_collider.py` keeps the collider it is about to replace, so rebuilding a
 # generative world is reversible. For a tracked world that copy is redundant --
 # the previous version is already in the history.
