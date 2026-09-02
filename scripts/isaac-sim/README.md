@@ -49,8 +49,8 @@ exporter**. The measurements below are from `marble-office`:
 | Is it metrically correct? | Yes — floor hit 1.367 m below a probe placed 1.371 m above it |
 | Does PhysX collide with it? | Yes — walls hit at 1.26 / 5.35 / 4.25 / 6.92 m in a 12.38 × 13.84 × 2.94 m room |
 | Is the room enclosed? | Nearly — 2 to 5 of 72 horizontal directions escape, versus 8 of 24 for a SHARP world |
-| Usable free area | 67.9 m² reachable free, 27.1 m² obstacle at 5 cm resolution — 77.0 m² before the reachability pass |
-| Can a robot drive it? | Yes — Spot reaches 4 of 4 spread-out goals autonomously, tracking the plan to 0.07–0.12 m |
+| Usable free area | 65.6 m² reachable free, 30.6 m² obstacle at 5 cm resolution — 72.0 m² before the reachability pass |
+| Can a robot drive it? | Yes — 18 of 18 map-sampled goals across both worlds, no recoveries; three of the four shipped policies drive it |
 
 The splat must be left out (`--no-splat`): `ParticleField3DGaussianSplat`
 needs OpenUSD 26.03 and Isaac Sim 5.1 ships 24.05. See `../usd-export/README.md`
@@ -80,9 +80,88 @@ left, and the map would come back as one solid slab of floor. A test asserts it,
 and also asserts the background is not a rigid body, since a triangle mesh can
 only be static and PhysX quietly substitutes a hull otherwise.
 
+## Running the whole chain (`pipeline.py`)
+
+```bash
+python scripts/isaac-sim/pipeline.py marble-office
+python scripts/isaac-sim/pipeline.py --all --json report.json
+```
+
+```
+    export  ->  map  ->  check  ->  nav2  ->  drive
+```
+
+Everything below this section existed before it did, and all of it was
+documented — as a list of commands for a person to type in order. **Nothing ran
+the list**, and two things grew in that gap:
+
+* `nav2_check.sh` had been unrunnable on every Windows checkout for as long as
+  `core.autocrlf` had been on, because a shell script with CRLF line endings is
+  not a shell script. The step that proves the map works in a real ROS stack was
+  broken, and nothing was red.
+* Recorded numbers drifted away from what the commands produce. The nav2 result
+  in this file named a goal that two later map fixes turned into an unknown
+  cell. The run had never been repeated, so nothing said so.
+
+The runner shells out rather than importing, because the stages genuinely do not
+share an interpreter — the exporter is Node, `build_navmap.py` and `navigate.py`
+need Isaac Sim's Python, `check_navmap.py` runs anywhere, and nav2 lives in WSL.
+Crossing those boundaries the same way a person does is the point; pretending
+they are not there is how the CRLF bug survived.
+
+Five things in it are worth calling out, because each replaces something that
+had already gone wrong:
+
+* **It computes nav2's goal from the map**, under nav2's own costmap rule
+  (`robot_radius` inflates lethal cells, `NO_INFORMATION` is not inflated),
+  rather than remembering one. A remembered goal is exactly what went stale.
+* **It judges the map, not the exit code.** `build_navmap.py` exits 0 on any
+  stage PhysX will load, and two worlds here build a map with 2.5 and 4.1 m² of
+  floor and nothing walkable where the viewer spawns a character. The old answer
+  to that was a green tick. The runner reads the build's own
+  `world_origin_reachable` and free area — both numbers the build already
+  computes — and calls it what it is.
+* **A stage that exits 0 without writing anything is caught.** `build_navmap.py`
+  refusing to guess a floor printed its refusal in full and still exited 0,
+  because once `SimulationApp` is up Kit catches `SystemExit`, logs it as
+  `[py stderr]`, shuts down and returns 0. A refusal that does not fail the
+  process is not a refusal — that is fixed in `build_navmap.py` with an explicit
+  `os._exit(1)` (placed *before* `simulation_app.close()`, because under
+  `--/app/fastShutdown=True` close() terminates the process itself with status
+  0 and nothing after it runs). The runner also records the map file's mtime and
+  fails the stage if it did not change, because each of those two holes hides
+  the other.
+* **A failed build does not get checked.** `build_navmap.py` failing leaves the
+  previous run's map on disk, and the three stages after it would read *that*.
+  Measured before the guard went in: `singleview-meetingroom` reported
+  `map:XX check:ok`, the check green against a map built an hour earlier under
+  different code. `--skip map` is deliberately unaffected, because re-checking
+  an existing map is exactly what that flag is for.
+* **It scrubs `PYTHONHOME` and `PYTHONPATH`** before launching Isaac Sim's
+  Python. Inheriting them makes a second interpreter load the first one's
+  standard library and die inside `re` with `SRE module mismatch`, which reads
+  as a broken Isaac Sim install and is not one. It only happens when a *program*
+  launches the stage — a shell has no such variables — so it is invisible until
+  something automates the pipeline, and then it fails on every world at once.
+
+| Flag | Meaning |
+| --- | --- |
+| `--all` | every world with a `scene.json` under `public/worlds/` |
+| `--skip export,drive` | leave stages out; names are `export map check nav2 drive` |
+| `--isaac <path>` | Isaac Sim root, if it is not found automatically |
+| `--robot <name>` | which policy drives the map (default `spot`) |
+| `--json <file>` | the whole report, per world and per stage |
+
+`scripts/isaac-sim/test_pipeline.py` covers the parts that need none of the four
+toolchains: the Windows → WSL path translation, the environment scrub, the map
+verdict, and the patterns that turn each stage's stdout into the report. Those
+patterns live in `pipeline.SAYS` and the tests use *those objects* rather than
+copies of them — a test that defines its own regex and then checks that regex is
+the same self-agreeing check this directory has spent two rounds unpicking.
+
 ## Usage
 
-First export the world for a Z-up physics consumer:
+The stages individually. First export the world for a Z-up physics consumer:
 
 ```bash
 npm run export:usd -- marble-office --no-splat --up-axis z
@@ -137,6 +216,47 @@ cannot be much smaller: the collision mesh is a shell with thickness, and this
 floor's two sheets sit 10 cm apart, so a 5 cm offset makes every cell that saw
 through a gap in the upper sheet collide with its own underside — measured, and
 it turned 7091 obstacle cells into 38503.
+
+### A cell is a column, not a centre line
+
+Fixing where the ray starts left it a *ray*: one infinitely thin line up the
+middle of a 5 cm cell. A robot is a volume, and so is the cell — it stands for
+the whole 5 × 5 cm column, not for its axis. Anything inside the cell but off
+that axis was invisible: the corner of a step, a chair leg between two centres,
+the lip of a kerb. That is the same shape of mistake as the one above, one level
+down, and it is exactly what stopped Spot: the ray went up through clear air
+*beside* the rise it needed to find.
+
+`overlap_box_any` tests the whole column instead, and both are now run on every
+cell every time, so the difference is a measurement in the JSON rather than a
+claim in this file:
+
+| World | ray blocks | box blocks | the ray walked past | the box missed |
+| --- | --- | --- | --- | --- |
+| `marble-office` | 5050 | 7054 | **2004** (5.0 m²) | 0 |
+| `marble-from-photo-7y19ti` | 1020 | 1775 | **755** (1.9 m²) | 0 |
+
+The last column is the self-check: the box strictly contains the ray's line, so
+it can only ever find more. A non-zero `ray_only` in the report would mean
+something is wrong with the query, not with the room.
+
+| World | free before | free after | obstacle before | obstacle after |
+| --- | --- | --- | --- | --- |
+| `marble-office` | 67.9 m² | 65.6 m² | 27.1 m² | 30.6 m² |
+| `marble-from-photo-7y19ti` | 16.8 m² | 16.2 m² | 12.1 m² | 13.3 m² |
+
+Two things make this checkable rather than merely plausible. The arithmetic
+closes exactly — `free_before_filters` drops 30805 → 28801 on `marble-office`
+and 7685 → 6930 on the photo world, which is 2004 and 755, the two `box_only`
+counts and nothing else. And `--probe ray` reproduces the previous grid to the
+cell: 27168 free, 10830 occupied, 41598 unknown, the same numbers the shipped
+JSON carried before this change. The probe is the only thing that moved.
+
+It costs 3.4% of `marble-office`'s walkable area and buys back nothing visible
+in the driving: the same five goals still arrive, with cross-track error inside
+a millimetre or two of what they were (0.079 against 0.080 m on the long one).
+What changes is that the map now says where the furniture is.
+
 
 ### Two passes turn "there is floor" into "a robot could be here"
 
@@ -274,7 +394,7 @@ down: it inflates lethal obstacles and leaves unknown cells alone.
 
 ```bash
 # inside WSL
-bash scripts/isaac-sim/nav2_check.sh /mnt/d/.../marble-office-navmap.yaml 3.79,9.02 0,0
+bash scripts/isaac-sim/nav2_check.sh /mnt/d/.../marble-office-navmap.yaml 2.04,8.72 0,0
 ```
 
 Brings up `nav2_map_server` and `nav2_planner` (NavFn over a `nav2_costmap_2d`
@@ -284,27 +404,42 @@ lifecycle transitions, and asks for a route through the real
 no controller, no behaviour tree. Those need a robot and say nothing about
 whether the map is usable.
 
-| World | nav2 route | `check_navmap.py` A* |
-| --- | --- | --- |
-| `marble-office` | 407 poses, **10.88 m** (detour x1.14) | 10.60 m, obstacles-only |
-| `marble-from-photo-7y19ti` | 203 poses, **5.36 m** (detour x1.04) | 5.29 m |
+| World | goal | nav2 route | `check_navmap.py` A*, same goal |
+| --- | --- | --- | --- |
+| `marble-office` | (2.04, 8.72) | 384 poses, **9.75 m** (detour x1.09) | 9.55 m (x1.07) |
+| `marble-from-photo-7y19ti` | (-0.85, 3.65) | 166 poses, **4.21 m** (detour x1.11) | 4.00 m (x1.07) |
+
+**The goals changed, and finding out why was the useful part.** This table used
+to record 407 poses to (3.79, 9.02). That goal is an *unknown* cell on the map
+in the tree today, and nav2 refuses it — which looked at first like the box
+probe having broken the nav2 path. It had not. Rebuilding the previous grid
+exactly, with `--probe ray`, and asking nav2 for the same goal fails the same
+way: the recorded result had come from a map superseded two fixes ago, and
+nothing anywhere would have said so. Given a goal a 0.25 m robot can actually
+stand on, the two grids agree — 9.83 m on the ray grid against 9.75 m on the box
+grid, the same route to within a step.
+
+Both runs log **zero** `worldToMap failed`, which is what the `--border` margin
+is for, and the negative control still holds: asked for (6.50, -4.30), out in
+the no-floor region, nav2 returns an empty path and aborts the action.
 
 `map_server` republishes the grid unchanged: 268 x 297 @ 0.05 m, origin
 (-5.735311692253731, -5.2518977547521235) -- every digit of what
 `build_navmap.py` wrote.
 
-**The negative control matters as much as the route.** Asked for a goal at
-(6.50, -4.30), out in the no-floor region, nav2 refuses: *"failed to generate a
-valid path"*, empty path, action aborted. It is respecting the occupied and
-unknown cells rather than drawing a line.
+The negative control is the half of that table that matters most: nav2 is
+respecting the occupied and unknown cells rather than drawing a line through
+them.
 
-**This also settles the walls-versus-holes question for a real stack.** nav2's
-10.88 m matches the obstacles-only A* (10.60 m), not the obstacles-and-holes
-scenario, which had no path at all. nav2's inflation layer grows lethal
-obstacles; unknown cells are `NO_INFORMATION` and are not inflated around --
-they simply cannot be routed through. So the disconnection `build_navmap.py
---robot-radius` reports is a property of that flag inflating both, and does not
-mean nav2 would refuse the map.
+**It also settles the walls-versus-holes question for a real stack.** nav2's
+9.75 m sits just above the obstacles-only A* over the same goal (9.55 m), and
+nav2's inflation layer is why: it grows lethal obstacles, while unknown cells
+are `NO_INFORMATION` and are not inflated around -- they simply cannot be routed
+through. So the disconnection `build_navmap.py --robot-radius` reports is a
+property of that flag inflating both, and does not mean nav2 would refuse the
+map. Modelling nav2 the other way is easy to do by accident, and it cost an hour
+here: `navmap.passable(r, avoid_unknown=True)` grows the holes too, which says
+no reachable pose exists where nav2 finds one.
 
 ### The ERROR storm, and what it was really saying
 
@@ -503,16 +638,32 @@ ahead *on the line* instead took the mean tracking error from 0.225 m to
 lethal obstacles and leaves `NO_INFORMATION` alone, which is right for a real
 robot in a real room: the floor is there, the map merely failed to see it. In
 here the room *is* the reconstruction, and a cell with no floor in the map has
-no floor in the collision mesh either. Planned nav2's way the route ran within
-0.07 m of unmapped space; with the holes counted as obstacles and a clearance
-preference in the cost, the tightest point on the route is 0.90 m.
+no floor in the collision mesh either. **This table used to say something stronger, from one route, and it was
+stale.** The figures it carried — a spread from 0.07 m to 0.90 m — came from a
+map built before the clearance ray was fixed, and its goal, (1.24, 8.32), is not
+even passable on the map in the tree today. A single route is also the wrong
+instrument: it measures the corridor it happens to run down. Redone over 24
+goals, each more than 3 m from the spawn and reachable under every setting being
+compared, `--robot-radius 0.35`:
 
-| planner setting | tightest clearance | median |
-| --- | --- | --- |
-| holes passable, shortest route (nav2's rules) | 0.07 m | 1.13 m |
-| holes passable, clearance preferred | 0.25 m | 1.30 m |
-| holes are obstacles, shortest route | 0.35 m | 1.45 m |
-| holes are obstacles, clearance preferred | **0.90 m** | 1.49 m |
+| planner setting | worst route | median | below the robot's own 0.35 m |
+| --- | --- | --- | --- |
+| holes passable, shortest route (nav2's rules) | 0.30 m | 1.07 m | 2 of 24 |
+| holes passable, clearance preferred | 0.45 m | 1.07 m | **0 of 24** |
+| holes are obstacles, shortest route | 0.35 m | 1.07 m | 2 of 24 |
+| holes are obstacles, clearance preferred | 0.45 m | 1.07 m | **0 of 24** |
+
+The clearance preference is what does the work, and it is worth its two lines:
+it is the difference between two routes in twenty-four that squeeze closer than
+the robot is wide and none that do. Counting the holes as obstacles, which the
+old table credited with most of the improvement, turns out to change almost
+nothing once the preference is on — the cost already steers away from them. It
+still matters without one (0.30 m against 0.35 m worst case).
+
+Run on the pre-box-probe grid the same 24 goals give 0.29 / 0.50 m against
+0.30 / 0.45 m, so the box probe barely moves the planner. It moves the
+*measurement*: the route was always that close to the furniture, and the map
+now says so.
 
 **And the map was wrong about a step.** With the route fixed and tracked to
 0.03 m, Spot still stopped dead — twice, in different places, both around
@@ -527,16 +678,51 @@ Spot, `--robot-radius 0.35`, holes counted as obstacles, clearance preferred,
 on maps built with `--max-step 0.10`. Four spread-out goals on `marble-office`
 plus the default goal on `marble-from-photo-7y19ti`:
 
-| goal | planned | drove | mean off-line | max | time |
-| --- | --- | --- | --- | --- | --- |
-| office (0.89, 7.97) | 8.10 m | 8.29 m (x1.02) | 0.080 m | 0.298 m | 13.2 s |
-| office (3.49, −3.93) | 5.28 m | 5.02 m (x0.95) | 0.066 m | 0.180 m | 8.0 s |
-| office (−2.01, −3.93) | 4.43 m | 4.50 m (x1.02) | 0.118 m | 0.303 m | 8.4 s |
-| office (−0.81, 4.12) | 4.18 m | 4.44 m (x1.06) | 0.099 m | 0.289 m | 8.0 s |
-| photo (−1.07, 2.82) | 3.50 m | 3.32 m (x0.95) | 0.056 m | 0.120 m | 7.6 s |
+| goal | planned | drove | mean off-line | max | time | route clearance |
+| --- | --- | --- | --- | --- | --- | --- |
+| office (0.89, 7.97) | 8.12 m | 8.32 m (x1.03) | 0.079 m | 0.296 m | 13.2 s | 0.45 m |
+| office (3.49, -3.93) | 5.29 m | 5.03 m (x0.95) | 0.068 m | 0.185 m | 8.0 s | 0.78 m |
+| office (-2.01, -3.93) | 4.43 m | 4.50 m (x1.02) | 0.118 m | 0.303 m | 8.4 s | 0.90 m |
+| office (-0.81, 4.12) | 4.18 m | 4.44 m (x1.06) | 0.099 m | 0.289 m | 8.0 s | 0.98 m |
+| photo (-1.07, 2.82) | 3.15 m | 2.96 m (x0.94) | 0.056 m | 0.132 m | 7.1 s | 0.70 m |
+These are the same five goals on maps rebuilt with the box-shaped clearance
+probe, so they are comparable with the run before it: every tracking figure is
+within 0.005 m of what it was, and the two distance columns within 3 cm. The map
+got stricter and the driving did not notice. The last column is new and is the
+point of the exercise — it is the tightest the route comes to anything the map
+knows about, and on the long run it reads 0.45 m where the old map claimed 0.90.
+Nothing moved; the map used to be missing the furniture.
+
+### Eighteen more, chosen by the map rather than by hand
+
+Five goals picked by a person is an anecdote, and the person picking them knows
+where the robot has already been. So: eighteen goals sampled from the maps
+themselves, spread by bearing and distance from the spawn, filtered only on
+being reachable at `--robot-radius 0.35`. Deliberately **not** filtered on how
+roomy they look — sorting by clearance and taking the best would be choosing the
+easy ones, and the success rate would then describe the choosing.
+
+| | `marble-office` | `marble-from-photo-7y19ti` |
+| --- | --- | --- |
+| goals | 12 | 6 |
+| **arrived** | **12 of 12** | **6 of 6** |
+| recoveries needed | 0 | 0 |
+| route length | 2.48 - 8.71 m | 1.60 - 4.22 m |
+| tightest clearance on route | 0.45 - 1.50 m | 0.57 - 0.96 m |
+| off the line, mean | median 0.104 m, worst 0.191 m | median 0.059 m, worst 0.077 m |
+| off the line, max | median 0.290 m, worst 0.324 m | median 0.112 m, worst 0.191 m |
+| drove / planned | x0.89 - x1.17 | x0.88 - x0.97 |
+
+**Eighteen of eighteen, no recoveries.** The worst tracking is on the *short*
+routes, not the long ones — 0.191 m mean over 2.55 m against 0.077 m over 8.71 m
+— because the turn at the start is a fixed cost and a short route has less
+distance to amortise it over. That is also why `drove / planned` reaches x1.17
+on a 2.48 m route: the robot swings out to face the line and the extra arc is a
+larger fraction of a short journey. Neither is a map problem, and neither gets
+worse as the route gets harder, which is the interesting part.
 
 **Five of five arrived**, none needed a recovery, and all five finished standing
-between 0.49 and 0.53 m above the floor — Spot's own standing height, so none of
+between 0.50 and 0.53 m above the floor — Spot's own standing height, so none of
 them arrived by falling over on the way. Driven distance within 6% of planned
 in every case: the robot is following the line, not finding its own way there.
 
@@ -695,38 +881,60 @@ raycast grid is the one that is checked.
   separates the two, and the mistakes are not symmetric — keeping a speck costs
   a slightly tighter map, removing a real leg costs a collision. Each run now
   reports the obstacle blob histogram instead, so the day specks stop being a
-  handful is visible. The 67.9 m² here against that tool's 73.03 m² walkable is
-  the two tools now disagreeing by 7%, from opposite directions: this one has
-  less headroom (0.6 m against 1.6 m) but checks it from the local ground, and
-  uses a 5 cm cell against that tool's 15 cm.
+  handful is visible. The 65.6 m² here against that tool's 73.03 m² walkable is
+  the two tools disagreeing by 11%, from opposite directions: this one has less
+  headroom (0.6 m against 1.6 m) but checks it from the local ground with a
+  cell-wide box, and uses a 5 cm cell against that tool's 15 cm. The gap widened
+  from 7% when the clearance probe stopped being a single ray, which is the
+  direction it should move: the finer probe finds more furniture.
 - The floor/obstacle split is a single height threshold, and it is looser than
   `--floor-tolerance` makes it sound: the reference is the *highest* vertex of
   the floor mesh, so on `marble-office` the band ends 0.49 m above a floor whose
-  median is 4 mm. The clearance ray no longer shares that reference, which is
-  what made it safe, but the classification still does, so the ground recorded
-  under free cells still reaches 0.473 m. `--max-step` is what turns the
-  difference between two such cells into an obstacle.
+  median is 4 mm. The clearance probe no longer shares that reference, which is
+  what made it safe; the classification still does. **How bad that is was
+  overstated here for a while.** The figure this bullet used to quote — walkable
+  ground reaching 0.473 m — was measured before the filters that drop it, so it
+  described a grid nobody ships. Measured on the map that is actually written,
+  `marble-office` reaches 0.159 m and the photo world 0.126 m, with p99 at 0.045
+  and 0.028. The loose threshold is real; it is a 16 cm tail, not a half-metre
+  one, and `--max-step` plus the box probe are what keep it there. Both numbers
+  are now in the JSON, the shipped one under `walkable_ground_z` and the raw one
+  under `walkable_ground_z.before_filters`.
 - **Nothing here localises.** `navigate.py` reads the robot's pose from the
   simulator, so this measures whether the *map* is drivable, not whether a robot
   could work out where it is on it. Adding AMCL or a lidar to close that half is
   a separate question, and its answer does not change any number above.
-- Only Spot has been driven. Of the four shipped policies `walk_robot.py`
-  measured H1 upright but slow, ANYmal and Spot walking, and Go2 never standing
-  at all. `--robot` accepts the others and nothing in the controller is
-  Spot-specific, but nothing has been measured either.
+- Three of the four shipped policies drive the map; this used to say only Spot
+  had been tried, and trying the others took one run each.
+
+  | `--robot` | result | mean off-line | max | standing |
+  | --- | --- | --- | --- | --- |
+  | `spot` | arrived, 13.2 s | 0.079 m | 0.296 m | 0.505 m |
+  | `anymal` | arrived, 12.2 s | **0.034 m** | 0.088 m | 0.558 m |
+  | `h1` | arrived, 13.0 s | 0.048 m | 0.117 m | 0.851 m |
+  | `go2` | **fell at 1.2 s**, 0.29 m in | — | — | 0.164 m |
+
+  Same goal, same gains, nothing retuned per robot. ANYmal and the H1 humanoid
+  both track the line better than the robot the controller was written against,
+  which is the useful direction for a claim like "nothing in the controller is
+  Spot-specific" to be wrong in. Go2 reproduces what `walk_robot.py` found: its
+  policy never gets the robot standing, and it goes over 1.2 s in having covered
+  0.29 m — before the route matters at all, so it says nothing about the map.
+  The run reports it as `FELL` rather than waiting out the timeout.
 
 ## Reachability and inflation, measured
 
-On `marble-office` the grid before the fill has 74.4 m² of floor spread over
-**150 disconnected regions** — but 149 of them come to 6.5 m² between them.
-Marble still leaves very little unreachable scrap. The region count tripled when
-the clearance ray was fixed, because furniture that used to read as open floor
-now cuts the room up, which is what furniture does.
+On `marble-office` the grid before the fill has 72.0 m² of floor spread over
+**189 disconnected regions** — but 188 of them come to 5.3 m² between them.
+Marble still leaves very little unreachable scrap. The region count keeps rising
+as the probe gets stricter — it tripled when the clearance ray was fixed, and
+went 150 → 189 when the ray became a box — because furniture that used to read
+as open floor now cuts the room up, which is what furniture does.
 
 | World | Raw free | Regions | Dropped | Reachable | With `--robot-radius 0.25` |
 | --- | --- | --- | --- | --- | --- |
-| `marble-office` | 74.4 m² | 150 | 6.5 m² | 67.9 m² | 48.8 m² |
-| `marble-from-photo-7y19ti` | 19.2 m² | 67 | 1.4 m² | 16.8 m² | 9.9 m² |
+| `marble-office` | 72.0 m² | 189 | 5.3 m² | 65.6 m² | 47.3 m² |
+| `marble-from-photo-7y19ti` | 17.3 m² | 100 | 0.9 m² | 16.2 m² | 9.4 m² |
 
 Two corrections moved these numbers, and both made them smaller. `--border`
 took the last column from 61.6 m² to 59.9 m²: before the border, inflation's
@@ -745,8 +953,8 @@ is `scene.json`'s `spawnPoint`, where the viewer drops a character — inside th
 kept region. That is the check that the fill latched onto the room rather than
 onto some other blob, and it costs nothing to run.
 
-Running with `--no-reachability` gives back 29771 free cells, which is exactly
-`raw free was 30805` minus the 1034 the step limit turned into obstacle — both
+Running with `--no-reachability` gives back 28378 free cells, which is exactly
+`raw free was 28801` minus the 423 the step limit turned into obstacle — both
 printed by the same run. The filters are additive and the identity is checkable
 without trusting either of them.
 
@@ -765,22 +973,35 @@ and a planner routes straight over it. `build_navmap.py` records the ground
 height under every cell it calls free, which turns the threshold from a constant
 into something measurable:
 
-| with `--max-step 0.10` | p50 | p95 | p99 | max | band ends at |
-| --- | --- | --- | --- | --- | --- |
-| `marble-office` | 0.004 | 0.052 | 0.148 | 0.473 | 0.491 |
-| `marble-from-photo-7y19ti` | 0.007 | 0.007 | 0.062 | 0.286 | 0.287 |
+| on the map as written | p50 | p95 | p99 | max | (before the filters) | band ends at |
+| --- | --- | --- | --- | --- | --- | --- |
+| `marble-office` | 0.004 | 0.004 | 0.045 | **0.159** | 0.473 | 0.491 |
+| `marble-from-photo-7y19ti` | 0.007 | 0.007 | 0.028 | **0.126** | 0.286 | 0.287 |
 
-The tail still reaches the band. `floor_top` is the *highest vertex of the floor
-mesh* — one outlier sets it — and the walkable band is `floor_top +
---floor-tolerance`, which on `marble-office` is 0.49 m over a floor whose median
-is 4 mm.
+**The two right-hand columns used to be one, and it was the wrong one.** This
+table was measured before the inflation and reachability passes and then
+presented as a description of the map that ships — so it reported walkable
+ground 0.473 m up on `marble-office`, when the ledge in question had already
+been dropped for having no route to it. The bold column is the grid actually
+written to the PNG; the one beside it is the raw physics, kept because a
+regression there is worth seeing even when the filters hide it. `build_navmap.py`
+writes both, as `walkable_ground_z` and `walkable_ground_z.before_filters`.
+
+The tail still reaches past the step limit, and the reason is unchanged:
+`floor_top` is the *highest vertex of the floor mesh* — one outlier sets it —
+and the walkable band is `floor_top + --floor-tolerance`, which on
+`marble-office` is 0.49 m over a floor whose median is 4 mm. It is a 16 cm tail
+rather than a half-metre one, which is a smaller problem than this section used
+to describe, but it is the same problem.
 
 `--max-step` turns a height change taller than the robot can climb into an
 obstacle, on both sides, so it is in the map rather than in this script and
 every consumer of the PNG sees it. A ramp is unaffected by construction: its
 height changes gradually, so no neighbouring pair exceeds the limit — the
-discrimination a single height threshold cannot make. At 0.10 m it costs
-`marble-office` 1034 cells (2.6 m²) and `marble-from-photo-7y19ti` 386 (1.0 m²).
+discrimination a single height threshold cannot make. At 0.10 m — now the default — it costs
+`marble-office` 423 cells (1.1 m²) and `marble-from-photo-7y19ti` 85 (0.2 m²),
+down from 1034 and 386 because the box-shaped clearance probe already catches
+most of a step's cells before this pass runs.
 
 Each run also reports what the limit costs the *fill*, whether or not it is on:
 

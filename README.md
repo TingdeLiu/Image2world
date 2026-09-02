@@ -224,8 +224,16 @@ transform chain is written out in
 
 A generated world can also leave the browser: the USD export drives it into
 Isaac Sim as a navigable environment, with the Gaussian splat as the camera's
-view and the collision mesh as PhysX geometry. Steps, measured results, and the
-version that matters are in [the Isaac Sim notes](./docs/ISAAC_SIM.md).
+view and the collision mesh as PhysX geometry. The whole chain — export, build
+the occupancy map, check it under `map_server`'s rules, plan on it with nav2,
+and drive a robot along the plan — runs as one command:
+
+```bash
+python scripts/isaac-sim/pipeline.py demo-office
+```
+
+Steps, measured results, and the version that matters are in
+[the Isaac Sim notes](./docs/ISAAC_SIM.md).
 
 ## Architecture
 
