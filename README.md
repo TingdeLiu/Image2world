@@ -236,9 +236,10 @@ python scripts/isaac-sim/pipeline.py demo-office
 Steps, measured results, and the version that matters are in
 [the Isaac Sim notes](./docs/ISAAC_SIM.md).
 
-The driving works. The VLN bar does not: no world here clears it, and the two
-that get furthest fail for opposite reasons — one is too small, the other too
-open for any route to need a turn. The gate says which, and why.
+The driving works. The VLN bar does not: no world here clears it, and no two of
+them miss it on the same criterion — one is too open for a route to need a turn,
+one is structured but too small to yield episodes, one is in pieces. The gate
+says which, and why, and draws the graph so the verdict can be checked by eye.
 
 
 ## Architecture

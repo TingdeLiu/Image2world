@@ -38,7 +38,7 @@ longer routes. Those are the shapes a world has to be able to produce.
                          wall hanging 80% of the way across -- two rooms by any
                          reading -- the median detour is 1.01, the same as the
                          open box, because most pairs of viewpoints share a side
-                         of the wall. The p90s are 2.20 and 1.01. A criterion on
+                         of the wall. The p90s are 2.32 and 1.01. A criterion on
                          the median, which is what this file first shipped with,
                          would have failed a real two-room capture and blamed
                          the reconstruction.
@@ -47,14 +47,15 @@ longer routes. Those are the shapes a world has to be able to produce.
                          path statistics. The yield is what says whether a
                          world contributes to a dataset or is a curiosity.
 
-What the eight worlds here score, because the tidy summary is wrong. The two
-that get furthest fail for opposite reasons: `marble-office` has 74 viewpoints,
-96% coverage and 100 episodes, and is too *open* to need any of them (detour p90
-1.03, with 0.4% of its viewpoint pairs having to go round anything);
-`demo-office` does have corners, and only 9 viewpoints in 16 m2 to see them
-from. The other six are smaller again. So the limit is not one thing, and
-"every world is one open room" -- which is what the first draft of this file
-said -- was half of it.
+What the eight worlds here score, because no single criterion explains it and
+the tidy summary is wrong. Three of the five are the *sole* blocker for some
+world: `marble-office` has the scale -- 99 viewpoints, full coverage, 100
+episodes -- and fails on detour alone at 1.12, with 3.7% of its 4,186 viewpoint
+pairs having to go round anything; `marble-from-photo-7y19ti` fails on episode
+yield alone, 19 of 50, in 9.6 m2; `singleview-meetingroom` on viewpoint count
+alone. "Every world is one open room" -- which is what the first draft of this
+file said -- was reading a bug that had viewpoints standing 0.5 m from every
+wall, and so was blind to exactly the routes that go round things.
 
 The verdict is written to JSON and printed; the exit code stays 0 unless
 something actually broke. A world that is honestly too small is a finding, not
@@ -101,10 +102,11 @@ CRITERIA = (
     ("detour_p90", lambda r: r["detour"].get("p90", 0.0), 1.20,
      "the space is one open room, so every route is a straight line -- this "
      "needs a capture with more than one room in it, not a better map",
-     # A p90 is the tenth-largest of a hundred. Over the 36 pairs nine
-     # viewpoints make it is the fourth-largest of 36, which moves by 0.05 if
-     # one chair does, and `demo-office` sits either side of the threshold
-     # depending on nothing much.
+     # A p90 is the tenth-largest of a hundred. Over the 66 pairs that
+     # `multiview-meetingroom`'s 32 viewpoints leave connected it is the
+     # seventh-largest, and it reads 3.25 -- measured inside the one fragment
+     # of a graph that is in 15 pieces, which is not a statement about the
+     # building. The threshold is on the sample, not on the world.
      lambda r: r["detour_pairs"] >= 100,
      "fewer than 100 viewpoint pairs, and a p90 over that few is noise"),
     ("episodes", lambda r: r["episodes"], 50,

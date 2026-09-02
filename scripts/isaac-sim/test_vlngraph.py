@@ -96,6 +96,27 @@ def test_nodes_keep_their_spacing():
             assert math.dist(a, b) >= least - 1e-9
 
 
+def test_a_corridor_the_robot_fits_gets_viewpoints():
+    """Clearance is measured from the obstacles, not from the edge of `passable`.
+
+    This corridor is 0.8 m wide, so its centre line is 0.4 m from either wall --
+    comfortably passable for a 0.25 m robot, and it should carry viewpoints.
+
+    It got none. `min_clearance` defaults to the robot's radius and was applied
+    to a clearance field computed from `~passable`, which has already had that
+    radius taken off it, so a viewpoint needed 0.5 m of wall clearance for a
+    0.25 m robot. Every small world in the tree failed `coverage` on the fringe
+    that excluded, and the detour figures were understated with it, because the
+    viewpoints nearest the walls are the ones whose routes go round things.
+    """
+    grid = np.full((120, 40), OCCUPIED, dtype=np.int8)
+    grid[10:110, 16:24] = FREE           # 0.8 m wide at 0.1 m per cell
+    carte = navmap.NavMap(grid, 0.1, (0.0, 0.0))
+    report = vlngraph.build(carte, spacing_m=0.75, robot_radius=0.25)
+    assert report["nodes"] > 5, report["nodes"]
+    assert report["coverage"] > 0.9
+
+
 def test_nodes_are_places_the_robot_fits():
     carte = box()
     report = vlngraph.build(carte, spacing_m=0.75, robot_radius=0.25)
@@ -248,28 +269,31 @@ SAMPLE = (Path(__file__).resolve().parents[2] / "public" / "worlds" / "demo-offi
 
 
 @pytest.mark.skipif(not SAMPLE.is_file(), reason="sample world not checked out")
-def test_the_sample_world_fails_on_size_and_not_on_shape():
+def test_the_sample_world_fails_on_connectivity_and_yield():
     """The finding this branch records, pinned so a map change has to restate it.
 
-    Worth being exact about, because the obvious summary is wrong. The two
-    worlds that get furthest fail for opposite reasons: `demo-office` has a
-    corner in it (detour p90 1.21, above the bar) and nowhere near enough room
-    to put viewpoints in, while `marble-office` has 74 viewpoints and is too
-    open to need them (p90 1.03). "Every world is one open room" would be a
-    tidier sentence and only half true.
+    `demo-office` places 21 viewpoints in 9.7 m2, covers all of it, and has real
+    corners -- detour p90 1.27 over 153 pairs, with 10.5% of them having to go
+    round something. What it does not have is one piece: three viewpoints sit in
+    dead-end spurs no straight edge reaches, so 86% of them are in the largest
+    component against a bar of 90%. Nor can 21 viewpoints yield 50 episodes.
 
-    Its p90 is over 36 pairs, so it is the fourth-largest of them, and the gate
-    declines to read it at all -- which is why what this asserts is that the
-    detour went *unassessed*, not that it passed. An earlier version of this
-    test asserted it passed, on a figure of 1.2146 against a threshold of 1.20.
+    Two earlier versions of this test asserted otherwise, and both were reading
+    a bug rather than the map. `min_clearance` defaulted to the robot's radius
+    and was applied to a clearance field measured from an already-inflated mask,
+    so viewpoints had to stand 0.5 m from a wall for a 0.25 m robot: 9 of them
+    instead of 21, coverage 0.85 instead of 1.00, and -- because the viewpoints
+    it suppressed are exactly the ones near walls, whose routes are the ones
+    that have to go round things -- detour understated everywhere.
     """
     carte = navmap.load(str(SAMPLE))
     rows = {row["criterion"]: row
             for row in vln_check.verdict(
                 vlngraph.build(carte, spacing_m=0.75, robot_radius=0.25))}
-    assert rows["nodes"]["met"] is False
-    assert rows["coverage"]["met"] is False
-    assert rows["detour_p90"]["met"] is None
+    assert rows["nodes"]["met"] is True
+    assert rows["coverage"]["met"] is True
+    assert rows["largest_fraction"]["met"] is False
+    assert rows["episodes"]["met"] is False
 
 
 @pytest.mark.skipif(not SAMPLE.is_file(), reason="sample world not checked out")

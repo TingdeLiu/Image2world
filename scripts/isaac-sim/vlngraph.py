@@ -26,9 +26,10 @@ means the whole of it is testable without a GPU or a simulator.
 
 Node placement prefers open space -- a panorama taken 10 cm from a wall is not
 a viewpoint anyone would annotate. That is a bias, and it is deliberately not
-the thing that gets measured: `coverage` is computed over every free cell, so
-if preferring the middle leaves the edges of the room unrepresented, the report
-says so rather than agreeing with the sampler.
+the thing that gets measured: `coverage` is computed over every passable cell,
+so if preferring the middle leaves the edges of the room unrepresented, the
+report says so rather than agreeing with the sampler. That is how the
+double-counted robot radius was eventually found.
 """
 from __future__ import annotations
 
@@ -190,7 +191,7 @@ def detour(nodes, adj, group, resolution):
     10x10 m box with a wall hanging 80% of the way across it -- unambiguously
     two rooms -- the median detour is still 1.01, because most pairs of
     viewpoints share a side of the wall and can see each other. The p90 of the
-    same space is 2.20 against 1.01 for the open box, which is what actually
+    same space is 2.32 against 1.01 for the open box, which is what actually
     separates them. A criterion on the median would have failed a genuine
     two-room capture and blamed the map.
     """
@@ -257,8 +258,20 @@ def build(carte, spacing_m=1.0, max_edge_m=2.5, robot_radius=0.25,
     # only. Growing the unknown as well asks a different question, and answering
     # that one here would make the graph disagree with the stack that drives it.
     passable = carte.passable(robot_radius=robot_radius, avoid_unknown=False)
-    clear_m = navmap.clearance(~passable, resolution,
-                              cap_m=max(1.0, min_clearance + resolution))
+    # Clearance from the obstacles, not from the edge of `passable`. `passable`
+    # has already had the robot's radius taken off it, so measuring from its
+    # boundary and then requiring `robot_radius` of that charges the radius
+    # twice -- viewpoints had to stand 0.5 m from a wall for a 0.25 m robot.
+    # That is what every small world was failing `coverage` on: the fringe it
+    # excluded is passable floor that no viewpoint was allowed to represent.
+    # Measured: `demo-office` went from 9 viewpoints at 0.85 coverage to 21 at
+    # 1.00, `marble-office` from 74 at 0.96 to 99 at 1.00. Because the
+    # viewpoints it suppressed are the ones nearest the walls, whose routes
+    # are the ones that go round things, it understated `detour` with them --
+    # `marble-office` p90 1.03 became 1.12, `multiview-meetingroom` 1.00
+    # became 3.25.
+    clear_m = navmap.clearance(carte.grid == navmap.OCCUPIED, resolution,
+                               cap_m=max(1.0, min_clearance + resolution))
 
     spacing_cells = spacing_m / resolution
     nodes = sample_nodes(passable, clear_m, spacing_cells, min_clearance)
