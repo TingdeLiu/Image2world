@@ -35,6 +35,11 @@ parser.add_argument("--robot-height", type=float, default=0.60,
                     help="clearance a robot needs above the floor, metres")
 parser.add_argument("--floor-tolerance", type=float, default=0.12,
                     help="how far above the floor a surface still counts as floor")
+parser.add_argument("--floor-z", type=float,
+                    help="height of the floor in stage units. Only needed when the "
+                         "collider has no classified `floor` part, in which case "
+                         "nothing in the export says where the floor is and the "
+                         "run refuses rather than guessing")
 parser.add_argument("--robot-radius", type=float, default=0.0,
                     help="grow obstacles by this radius in metres; 0 keeps the raw grid")
 parser.add_argument("--spawn", metavar="X,Y",
@@ -42,10 +47,15 @@ parser.add_argument("--spawn", metavar="X,Y",
                          "default is the largest connected free region")
 parser.add_argument("--no-reachability", action="store_true",
                     help="keep free cells that have no route to the spawn")
-parser.add_argument("--max-step", type=float, default=0.0,
+parser.add_argument("--max-step", type=float, default=0.10,
                     help="tallest step the robot can climb, metres. A bigger height "
                          "change between neighbouring cells becomes an obstacle, and "
                          "the flood fill will not cross it. 0 keeps the map purely 2D")
+parser.add_argument("--probe", choices=("box", "ray"), default="box",
+                    help="how to test a cell's column for clearance: a cell-wide "
+                         "box, or a single ray up the cell's centre. Both are "
+                         "always measured and reported; this picks which one the "
+                         "map is written from")
 parser.add_argument("--border", type=float, default=0.5,
                     help="metres of unknown margin around the grid; 0 stops at the "
                          "collider's bounding box")
@@ -98,6 +108,26 @@ if args.no_renderer:
     config["extra_args"] = []
 
 simulation_app = SimulationApp(config, experience=experience)
+
+
+def die(message):
+    """Stop with a message and a non-zero exit code.
+
+    `raise SystemExit(msg)` does not do that here. Once `SimulationApp` is up,
+    Kit catches SystemExit, logs it as `[py stderr]`, shuts down cleanly and the
+    process returns 0 -- so `pipeline.py` recorded a refused build as a success
+    and went on to read the map file a previous run had left behind. The
+    message was printed in full and changed nothing, which is the worst of both.
+    """
+    # The marker is for `pipeline.py`, which otherwise records a refusal as
+    # `exit 1` and loses the sentence explaining it.
+    print("REFUSED: " + message)
+    sys.stdout.flush()
+    # Straight out, without `simulation_app.close()`. The config here sets
+    # `--/app/fastShutdown=True`, and under that Kit's close() terminates the
+    # process itself, with status 0 -- so an `os._exit(1)` placed after it never
+    # runs. Measured: the refusal printed in full and the caller saw success.
+    os._exit(1)
 
 import numpy as np
 import omni.kit.app
@@ -161,19 +191,62 @@ cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdG
 # collider is the right thing to measure.
 collider_prim = stage.GetPrimAtPath("/Environment/Background/Collider")
 if not (collider_prim and collider_prim.IsValid()):
-    raise SystemExit(
-        "no /Environment/Background/Collider in this stage -- was it exported "
-        "with --no-collider?"
-    )
+    die("no /Environment/Background/Collider in this stage -- was it exported "
+        "with --no-collider?")
 world = cache.ComputeWorldBound(collider_prim).ComputeAlignedRange()
 wmin, wmax = world.GetMin(), world.GetMax()
+# Where the floor is decides the height every ray in this script starts from,
+# so getting it wrong is not a small error -- it is every measurement.
+#
+# The old fallback for a collider with no classified `floor` part was the whole
+# collider's bounding box, and `GetMax()[2]` of that is the CEILING. Measured
+# across the eight worlds in this tree: three of them export a single
+# unclassified `geometry_0` collider, and for those the fallback put `floor_top`
+# at 0.94 to 0.97 of the room height -- 19.563 m in a 20.281 m world. Every
+# downward ray then started 20 m above the floor and travelled 2.6 m, hitting
+# nothing; the map came back with 0.02 m2 walkable and `build_navmap.py` exited
+# 0. Nothing said the floor had been mistaken for the ceiling.
+#
+# So: take it from the collider's own floor part, or from `--floor-z`, or stop.
+# The `else` below says why there is no third option.
 floor_prim = stage.GetPrimAtPath("/Environment/Background/Collider/floor")
-floor_range = cache.ComputeWorldBound(floor_prim).ComputeAlignedRange() if floor_prim else world
-floor_top = float(floor_range.GetMax()[2])
+if args.floor_z is not None:
+    floor_top = args.floor_z
+    floor_source = "--floor-z"
+elif floor_prim and floor_prim.IsValid():
+    floor_top = float(cache.ComputeWorldBound(floor_prim).ComputeAlignedRange().GetMax()[2])
+    floor_source = "the collider's floor part"
+else:
+    # Do not guess. Both obvious guesses were tried and measured, on the two
+    # worlds here that export a single unclassified `geometry_0` collider:
+    #
+    #   the bounding box's top     -- the CEILING. 19.563 m in a 20.281 m world.
+    #                                 Every downward ray then starts 20 m above
+    #                                 the floor and travels 2.6 m, hitting
+    #                                 nothing. 0.02 and 3.16 m2 walkable.
+    #   the bounding box's bottom  -- below the floor, because the collider has
+    #                                 stray geometry under it. The walkable band
+    #                                 then excludes the real floor entirely.
+    #                                 0.00 m2 on both.
+    #
+    # A third guess would be tuning against these two worlds. The honest answer
+    # is that this export does not record where its floor is, and the map that
+    # comes out of guessing is worse than no map -- the first guess shipped a
+    # grid that looked plausible and was nonsense.
+    die("this collider has no classified `floor` part, so there is nothing here "
+        "that says where the floor is.\n"
+        "  Its parts are: "
+        + ", ".join(sorted(child.GetName() for child in collider_prim.GetChildren()))
+        + "\n"
+        "  A classified collider has floor/wall/ceiling/ramp/elevated, and "
+        "backend/tools/build_collider.py <slug> is what produces one. Run that "
+        "and re-export, or pass --floor-z <metres> if you already know where "
+        "the floor is in this stage.")
 print(f"world {wmax[0] - wmin[0]:.2f} x {wmax[1] - wmin[1]:.2f} x {wmax[2] - wmin[2]:.2f} m, "
-      f"floor top z={floor_top:.3f}")
+      f"floor top z={floor_top:.3f} (from {floor_source})")
 report["world_size_m"] = [round(float(wmax[i] - wmin[i]), 3) for i in range(3)]
 report["floor_top_z"] = round(floor_top, 3)
+report["floor_top_from"] = floor_source
 
 # --- route 1: the shipped occupancy extension ---------------------------
 print("\n--- omap ---")
@@ -271,6 +344,27 @@ for iy in range(ny):
 # Measured, not guessed -- at 5 cm the map went from 7091 obstacle cells to
 # 38503, most of the room.
 clearance_from = args.floor_tolerance
+#
+# The column gets tested two ways, because the obvious way is not the honest one.
+#
+# `raycast_closest` is a line through the cell's centre. A robot is a volume and
+# a cell is 5 cm across, so anything standing inside the cell but off its centre
+# line is invisible to the ray: the corner of a step, a chair leg between two
+# centres, the lip of a kerb. That is not a hypothetical gap. It is the shape of
+# the bug that stopped Spot at (0.95, 6.21) -- the ray went up through clear air
+# beside the rise it needed to see.
+#
+# `overlap_box_any` tests the whole cell-wide column instead, which is the volume
+# the cell actually stands for. The box strictly contains the ray's line, so it
+# can only find more; `ray_only` in the report should be 0 and is worth watching
+# in case it is not. Both are run every time and the difference is written to the
+# JSON, because "the box is stricter here" is a measurement about this room, not
+# a property of geometry, and it should not live in a comment.
+IDENTITY = (0.0, 0.0, 0.0, 1.0)
+half = args.cell_size / 2.0
+column = args.robot_height          # the span the ray covers, matched exactly
+by_ray = np.zeros(grid.shape, dtype=bool)
+by_box = np.zeros(grid.shape, dtype=bool)
 for iy in range(ny):
     wy = y0 + (iy + 0.5) * args.cell_size
     for ix in range(nx):
@@ -278,11 +372,22 @@ for iy in range(ny):
             continue
         wx = x0 + (ix + 0.5) * args.cell_size
         base = float(height[iy, ix]) + clearance_from
-        hit = sq.raycast_closest(
-            (wx, wy, base), (0.0, 0.0, 1.0), args.robot_height
-        )
-        if hit and hit.get("hit"):
-            grid[iy, ix] = OCCUPIED
+        hit = sq.raycast_closest((wx, wy, base), (0.0, 0.0, 1.0), column)
+        by_ray[iy, ix] = bool(hit and hit.get("hit"))
+        by_box[iy, ix] = bool(sq.overlap_box_any(
+            (half, half, column / 2.0), (wx, wy, base + column / 2.0), IDENTITY
+        ))
+
+ray_n, box_n = int(by_ray.sum()), int(by_box.sum())
+both_n = int((by_ray & by_box).sum())
+grid[by_box if args.probe == "box" else by_ray] = OCCUPIED
+print(f"  clearance: ray blocks {ray_n} cells, cell-wide box blocks {box_n} "
+      f"({box_n - both_n} the ray walked past, {ray_n - both_n} the box missed) "
+      f"-- map written from the {args.probe}")
+report["clearance_probe"] = {
+    "used": args.probe, "ray_blocked": ray_n, "box_blocked": box_n,
+    "both": both_n, "box_only": box_n - both_n, "ray_only": ray_n - both_n,
+}
 
 timeline.stop()
 
@@ -467,23 +572,31 @@ speck_sizes = sorted(len(b) for b in obstacle_blobs)
 specks = sum(1 for n in speck_sizes if n <= 2)
 print(f"  obstacles form {len(obstacle_blobs)} blobs, largest {speck_sizes[-1] if speck_sizes else 0}"
       f" cells, {specks} of 1-2 cells (kept: a speck and a chair leg look alike here)")
-# How high the ground is under the cells the map calls walkable. A flat room
-# puts every percentile within a centimetre or two of the floor; a tail reaching
-# toward `floor_top + tolerance` means the threshold is admitting steps, and the
-# p100 is the tallest thing a planner is being told it can drive onto.
-walkable_z = height[grid == FREE]
-walkable_z = walkable_z[~np.isnan(walkable_z)]
-if walkable_z.size:
-    percentiles = {f"p{q}": round(float(np.percentile(walkable_z, q)), 4)
-                   for q in (0, 50, 95, 99, 100)}
-    print(f"  ground under the free cells: p50={percentiles['p50']:.3f} "
-          f"p99={percentiles['p99']:.3f} max={percentiles['p100']:.3f} m "
-          f"(floor {floor_top:.3f}, band ends {floor_top + args.floor_tolerance:.3f})")
-    report["walkable_ground_z"] = {
-        "floor_top": round(floor_top, 4),
-        "band_top": round(floor_top + args.floor_tolerance, 4),
-        **percentiles,
-    }
+
+
+def ground_under_free():
+    """Percentiles of the measured ground beneath whatever `grid` now calls free.
+
+    A flat room puts every percentile within a centimetre or two of the floor; a
+    tail reaching toward `floor_top + tolerance` means the threshold is admitting
+    steps, and the p100 is the tallest thing a planner is being told it can drive
+    onto.
+
+    This is a function because *when* it runs changes what it means, and the two
+    moments are worth keeping apart. Run before the filters it describes the raw
+    physics; run after them it describes the map that ships. It used to run only
+    at the first moment and be reported as if it were the second, so the JSON
+    said marble-office had walkable ground 0.473 m up when the ledge in question
+    had already been dropped for having no route to it.
+    """
+    z = height[grid == FREE]
+    z = z[~np.isnan(z)]
+    if not z.size:
+        return None
+    return {f"p{q}": round(float(np.percentile(z, q)), 4) for q in (0, 50, 95, 99, 100)}
+
+
+raw_ground = ground_under_free()
 
 report["obstacle_blobs"] = {
     "count": len(obstacle_blobs),
@@ -590,6 +703,21 @@ else:
     # Recorded either way, so a consumer of the JSON can tell an unfiltered map
     # from one that simply had nothing to drop.
     report["reachability"] = None
+
+shipped_ground = ground_under_free()
+if shipped_ground:
+    print(f"  ground under the free cells: p50={shipped_ground['p50']:.3f} "
+          f"p99={shipped_ground['p99']:.3f} max={shipped_ground['p100']:.3f} m "
+          f"(floor {floor_top:.3f}, band ends {floor_top + args.floor_tolerance:.3f}"
+          + (f"; before the filters the max was {raw_ground['p100']:.3f}"
+             if raw_ground and raw_ground["p100"] > shipped_ground["p100"] + 5e-4 else "")
+          + ")")
+    report["walkable_ground_z"] = {
+        "floor_top": round(floor_top, 4),
+        "band_top": round(floor_top + args.floor_tolerance, 4),
+        **shipped_ground,
+        "before_filters": raw_ground,
+    }
 
 free_n = int((grid == FREE).sum())
 occ_n = int((grid == OCCUPIED).sum())
