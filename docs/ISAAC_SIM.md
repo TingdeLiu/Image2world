@@ -32,6 +32,62 @@ The navigation map itself does not care — 5.1 and 6.0 produce bit-identical
 grids — so 5.1 remains a usable fallback if 6.0 misbehaves. Everything else
 prefers 6.0.
 
+## Or all of it at once
+
+```bash
+python scripts/isaac-sim/pipeline.py marble-office
+python scripts/isaac-sim/pipeline.py --all --json report.json
+```
+
+```
+    export  ->  map  ->  check  ->  nav2  ->  drive
+```
+
+Every stage below already existed, and every stage was documented — as a list of
+commands for a person to type in order. Nothing ran the list, and two things
+grew in the gap:
+
+* `nav2_check.sh` had been unrunnable on **every Windows checkout** for as long
+  as `core.autocrlf` had been on, because a shell script with CRLF line endings
+  is not a shell script. The step that proves the map works in a real ROS stack
+  was broken, and nothing was red.
+* Recorded numbers drifted from what the commands produce. A nav2 result in this
+  file named a goal that two later map fixes turned into an unknown cell; the
+  run had never been repeated, so nothing said so.
+
+`pipeline.py` runs the stages, checks each one's output rather than only its
+exit code, and prints a line per stage. It shells out rather than importing,
+because the stages genuinely do not share an interpreter — the exporter is
+Node, `build_navmap.py` and `navigate.py` need Isaac Sim's Python,
+`check_navmap.py` runs anywhere, and nav2 lives in WSL. That boundary is where
+this repository's bugs live, so the runner crosses it the same way a person
+would.
+
+It finds Isaac Sim itself, detects whether WSL can see the repo (and reports
+nav2 as *skipped* rather than failing if not), and — the part that matters —
+**computes nav2's goal from the map** rather than remembering one, using nav2's
+own costmap rule. A remembered goal is exactly what went stale.
+
+Running it turned up five things that had been true for a while and invisible,
+because a list of commands nobody executes cannot fail. All five are written up
+in `scripts/isaac-sim/README.md`; the shape of them is worth the summary:
+
+| | What was wrong | Why nothing caught it |
+| --- | --- | --- |
+| `PYTHONHOME` leaked into Isaac Sim's Python | every `map` and `drive` stage died in `re` | only happens when a *program* launches the stage; a shell has no such variable |
+| exit 0 ≠ a usable map | a 0.02 m² grid reported as success | nothing read the output, only the status |
+| the floor fell back to the ceiling | three worlds silently mapped nothing | the fallback was plausible and never measured |
+| a refusal that exits 0 | the message printed and changed nothing | Kit catches `SystemExit` and shuts down cleanly |
+| a failed build got checked anyway | `map:XX check:ok` against an hour-old map | the check read a file it had not watched being written |
+
+| Flag | Meaning |
+| --- | --- |
+| `--all` | every world with a `scene.json` under `public/worlds/` |
+| `--skip export,drive` | leave stages out; names are `export map check nav2 drive` |
+| `--isaac <path>` | Isaac Sim root, if it is not found automatically |
+| `--robot <name>` | which policy drives the map (default `spot`) |
+| `--json <file>` | the whole report, per world and per stage |
+
 ## The three commands
 
 ### 1. Export the world as USD
@@ -68,28 +124,81 @@ Output, beside the `.usdz`:
 | `--cell-size` | `0.05` | grid resolution, metres |
 | `--robot-height` | `0.60` | clearance the robot needs above the floor |
 | `--floor-tolerance` | `0.12` | how far above the floor still counts as floor |
+| `--floor-z` | (unset) | height of the floor, for a collider that has no classified `floor` part |
 | `--robot-radius` | `0.0` | grow obstacles by this radius before writing the map |
 | `--spawn` | largest region | `X,Y` in world metres to flood fill from |
 | `--no-reachability` | off | keep free cells with no route to the spawn |
 | `--border` | `0.5` | metres of unknown margin around the grid |
-| `--max-step` | `0.0` | a taller height change between neighbours becomes an obstacle; 0 keeps the map 2D |
+| `--max-step` | `0.10` | a taller height change between neighbours becomes an obstacle; 0 keeps the map 2D |
+| `--probe` | `box` | test a cell's column for clearance with a cell-wide box, or with one ray up its centre |
 
 `--robot-radius` is off by default because nav2 inflates in its own costmap
 layer and would do it twice. Set it for a planner that does not, or to see how
 much of the room a given robot actually fits in.
+
+`--floor-z` exists for one situation and should otherwise never be needed. The
+floor height sets the start height of every ray in the script, so getting it
+wrong is not a small error — it is every measurement. A collider classified into
+`floor / wall / ceiling / ramp / elevated` says where its floor is;
+`backend/tools/build_collider.py` is what produces one. A collider that is a
+single unclassified `geometry_0` mesh does not, and `build_navmap.py` now
+**refuses** rather than guessing.
+
+That refusal replaced a guess, and the guess was the bounding box — whose
+`GetMax()[2]` is the *ceiling*. Three worlds in this tree export an unclassified
+collider, and for all three the old code put the floor at 0.94 to 0.97 of the
+room height: 19.563 m in a 20.281 m world. Every downward ray then started 20 m
+above the floor, travelled 0.6 m, and hit nothing. The maps came back with 0.02
+to 3.16 m² walkable and the build exited 0. Guessing the *bottom* of the
+bounding box instead was measured too, and is worse — 0.00 m² on both, because
+the collider has stray geometry below the floor. Two guesses, both wrong in
+opposite directions, is the argument for not guessing a third time.
+
+Finding the number by hand is not hard, and needs no Isaac Sim — a floor is a
+spike in the collider's height histogram. On `multiview-meetingroom` the world-z
+of the collider's points spans −0.273 to 4.389 m, and the densest 0.155 m band
+holds 2190 of 23769 points at **0.038 to 0.193 m**. That band is the floor, so
+`--floor-z 0.15`:
+
+```python
+from pxr import Usd, UsdGeom
+import numpy as np
+stage = Usd.Stage.Open("<world>.usdz")
+mesh = next(p for p in stage.Traverse()
+            if "/Collider/" in str(p.GetPath()) and p.IsA(UsdGeom.Mesh))
+points = np.array(UsdGeom.Mesh(mesh).GetPointsAttr().Get())
+to_world = np.array(UsdGeom.Xformable(mesh).ComputeLocalToWorldTransform(
+    Usd.TimeCode.Default())).reshape(4, 4)
+z = (np.c_[points, np.ones(len(points))] @ to_world)[:, 2]
+counts, edges = np.histogram(z, bins=30)
+print(edges[counts.argmax()], edges[counts.argmax() + 1])
+```
+
+Note the transform: `GetPointsAttr()` returns *local* coordinates, and on this
+world they span 17 m against the 4.66 m the room actually is.
 
 `--border` is on by default because a grid that stops exactly at the collider's
 bounding box has free cells in its last row, and both the inflation here and a
 planner's own neighbourhood queries then run off the end of the array. Set it to
 `0` to get the bare bounding box back.
 
-`--max-step` is off by default for the same reason `--robot-radius` is: the
-right step height belongs to a particular robot, and with it off the map stays a
-measurement of the room. **Set it for any map a robot will actually drive.**
-Without it a 16 cm rise reads as flat floor, and `navigate.py` walked Spot into
-exactly that, three runs running, on a route the map said was clear. At 0.10 m
-it costs `marble-office` 1034 cells (2.6 m²). `navigate.py` warns when it loads
-a map built without it.
+`--max-step` used to default to `0`, on the argument that a step height belongs
+to a particular robot and the map should stay a measurement of the room. That
+argument does not survive contact with the rest of the table: `--robot-height`
+and `--floor-tolerance` are robot-shaped numbers with non-zero defaults too, so
+`--max-step 0` was not neutrality, it was one robot parameter singled out to be
+absent. What it bought was a map in which a 16 cm rise reads as flat floor —
+`navigate.py` walked Spot into exactly that, three runs running, on a route the
+map said was clear. Worse, both maps in this repo were built with `--max-step
+0.10` while the recipe above and this table said `0.0`, so the documented
+command did not rebuild the shipped map.
+
+It now defaults to `0.10`, which costs `marble-office` 423 cells (1.1 m²) —
+fewer than the 1034 it cost before, because the box-shaped clearance probe
+described in `scripts/isaac-sim/README.md` already catches most of a step's
+cells on its own. Pass `--max-step 0` for a purely two-dimensional measurement
+of the room. The command under **2. Build the map** now reproduces the maps this
+page quotes, which it did not while the default and the shipped maps disagreed.
 
 ### 3. (Optional) get a PLY for anything that wants one
 
@@ -137,18 +246,62 @@ Two things the map deliberately excludes:
   against the collider's 12.38 × 13.84). The grid is bounded by the collision
   mesh instead.
 
+## Every world in the tree, one command
+
+`pipeline.py --all`, on this machine, against every world under
+`public/worlds/`:
+
+| World | export | map | check | nav2 | drive |
+|---|---|---|---|---|---|
+| `demo-office` | ok | ok | ok | ok | ok |
+| `family-splatfacto-integration-jpjwgt` | ok | **fail** | -- | -- | -- |
+| `marble-from-photo-7y19ti` | ok | ok | ok | ok | ok |
+| `marble-office` | ok | ok | ok | ok | ok |
+| `multiview-meetingroom` | ok | **fail** | -- | -- | -- |
+| `room1-cbti0t` | ok | **fail** | -- | -- | -- |
+| `singleview-meetingroom` | ok | **fail** | -- | -- | -- |
+| `sunlit-office-k7hil8` | ok | **fail** | -- | -- | -- |
+
+**3 of 8 pass every stage** — `demo-office`, `marble-from-photo-7y19ti`, `marble-office` — which is the export, the
+occupancy map, the `map_server` check, a nav2 plan and a robot driving that
+plan, from one command.
+
+The rest stop at the first stage that can tell they are not a room, and
+say which:
+
+| World | Stage | What it reported |
+|---|---|---|
+| `family-splatfacto-integration-jpjwgt` | map | refused - the collider has no classified `floor` part |
+| `multiview-meetingroom` | map | refused - the collider has no classified `floor` part |
+| `room1-cbti0t` | map | unusable map: nothing walkable at the world origin (2.49 m2 free) |
+| `singleview-meetingroom` | map | refused - the collider has no classified `floor` part |
+| `sunlit-office-k7hil8` | map | unusable map: nothing walkable at the world origin (4.11 m2 free) |
+
+None of those is the pipeline failing. Three of them export a single
+unclassified `geometry_0` collider, so nothing in the file says where the
+floor is, and the build refuses rather than guessing. The other two
+reconstructed a floor too broken to stand on: `room1-cbti0t` has no floor
+under 88% of its own footprint, and `sunlit-office-k7hil8` splits 12.7 m²
+of floor into 172 disconnected pieces of which the largest is 4.1 m² and
+does not contain the spawn. The map says so now instead of producing a
+grid that looks plausible and is nonsense.
+
 ## What you get, measured
 
 Both worlds, Isaac Sim 6.0.1, 5 cm cells, 0.6 m clearance:
 
 | World | Room | Free | Obstacle | No floor | Free for a 0.25 m robot |
 | --- | --- | --- | --- | --- | --- |
-| `marble-office` | 12.38 × 13.84 × 2.94 m | 67.9 m² | 27.1 m² | 76.7 m² | 48.8 m² |
-| `marble-from-photo-7y19ti` | 9.04 × 9.60 × 2.64 m | 16.8 m² | 12.1 m² | 57.9 m² | 9.9 m² |
+| `marble-office` | 12.38 × 13.84 × 2.94 m | 65.6 m² | 30.6 m² | 75.6 m² | 47.3 m² |
+| `marble-from-photo-7y19ti` | 9.04 × 9.60 × 2.64 m | 16.2 m² | 13.3 m² | 57.4 m² | 9.4 m² |
 
-Both were built with `--max-step 0.10`, without which the map calls a 16 cm
-rise floor and a robot walking on it stops there — see
-`scripts/isaac-sim/README.md`.
+Free is down and obstacle up against the figures this table used to carry (67.9
+/ 27.1 and 16.8 / 12.1). Nothing about the rooms changed: the clearance check
+stopped being a single ray up each cell's centre line and became a box the width
+of the cell, which is the volume the cell stands for. See **A cell is a column,
+not a centre line** in `scripts/isaac-sim/README.md` — on `marble-office` the ray
+walked past 2004 cells with something standing in them, 5.0 m² the map used to
+call open floor.
 
 "No floor" is the reconstruction's holes only. The grid also carries a 0.5 m
 `--border` of unknown cells — 27.3 m² on `marble-office` — which the run reports
@@ -156,15 +309,17 @@ separately, because the two mean opposite things: one is a measurement of the
 reconstruction, the other is a margin we chose.
 
 The reachability pass is worth less than it sounds like and the reason is a
-compliment to the collider: `marble-office`'s raw grid has 74.4 m² of floor in
-**150 disconnected regions**, but 149 of them add up to only 6.5 m². Marble's
+compliment to the collider: `marble-office`'s raw grid has 72.0 m² of floor in
+**189 disconnected regions**, but 188 of them add up to only 5.3 m². Marble's
 reconstruction leaves very little unreachable scrap. On a SHARP world the same
 pass would matter far more.
 
 The last column is where a robot's *centre* can be, once obstacles and holes are
-grown by 0.25 m. It costs `marble-office` 23.9 m² and takes the region count
-from 34 to 10, because inflation swallows the small scraps whole before the fill
-ever sees them.
+grown by 0.25 m. It costs `marble-office` 18.3 m², and it breaks the single
+connected room the fill left into 12 pieces — the one holding the spawn keeps
+47.3 m² of the 47.5 m² that survive the growing, so inflation strands very
+little here. It swallows the small scraps whole rather than disconnecting big
+ones.
 
 Sanity checks that the geometry survived the trip:
 
@@ -178,10 +333,11 @@ Sanity checks that the geometry survived the trip:
 * **Three ways of seeding it agree.** The largest-region default, an explicit
   `--spawn 0,0`, and a deliberately off-map `--spawn 100,100` that falls back to
   the nearest free cell **no longer agree**, and the disagreement is the point.
-  The largest-region default and `--spawn 0,0` both keep 27168 cells. The
-  off-map spawn now falls back into an 11-cell pocket in a far corner and keeps
-  only that — because the corrected map has 150 disconnected regions where it
-  used to have 34, so "the nearest free cell" is a much worse guess than it was.
+  The largest-region default and `--spawn 0,0` both keep 26246 cells. The
+  off-map spawn now falls back into a four-cell pocket in a far corner and keeps
+  only that
+  — because the corrected map has 189 disconnected regions where it used to have
+  34, so "the nearest free cell" is a much worse guess than it was.
   The run says so on its own: `world origin reachable: False`. That flag exists
   for exactly this, and it caught it without anyone looking.
 
@@ -191,8 +347,8 @@ Sanity checks that the geometry survived the trip:
 * Rigid bodies dropped from 1.97 m rest at 0.10–0.15 m, on the floor.
 * The map's origin (−5.235) matches `0-world-walkable.json`, the project's own
   walkable-area tool, exactly.
-* That tool reports 73.03 m² walkable against this map's 67.9 m². They now
-  disagree by 7%, from opposite directions: this one assumes less headroom
+* That tool reports 73.03 m² walkable against this map's 65.6 m². They now
+  disagree by 11%, from opposite directions: this one assumes less headroom
   (0.6 m against 1.6 m) but measures it from the ground under each cell rather
   than from a single floor plane, and uses a 5 cm cell against that tool's
   15 cm. Before the clearance ray was fixed this map read 83.8 m², which was
@@ -354,22 +510,27 @@ the reconstruction. Inflating the two together, which is what
 ### nav2 plans on it
 
 ```bash
-bash scripts/isaac-sim/nav2_check.sh <map>.yaml 3.79,9.02 0,0   # inside WSL
+bash scripts/isaac-sim/nav2_check.sh <map>.yaml 2.04,8.72 0,0   # inside WSL
 ```
 
 The real stack, not a stand-in: `nav2_map_server` publishing the grid,
 `nav2_planner` running NavFn over a `nav2_costmap_2d` global costmap at
 `robot_radius: 0.25` and `allow_unknown: false`, asked through the
-`ComputePathToPose` action. `marble-office` plans 407 poses over 10.88 m;
-`marble-from-photo-7y19ti` 203 poses over 5.36 m. `map_server` republishes the
-grid to the last digit of the origin `build_navmap.py` wrote.
+`ComputePathToPose` action. `marble-office` plans 384 poses over 9.75 m to
+(2.04, 8.72); `marble-from-photo-7y19ti` 166 poses over 4.21 m to (-0.85, 3.65).
+Both log zero `worldToMap failed`. `map_server` republishes the grid to the last
+digit of the origin `build_navmap.py` wrote.
 
 Asked for a goal out in the no-floor region, nav2 refuses with an empty path, so
 it is reading the map rather than drawing lines.
 
+The goals are not the ones this page used to quote, and `scripts/isaac-sim/README.md`
+has the story: the old goal (3.79, 9.02) is an unknown cell on today's map, and
+the 407-pose result recorded against it came from a grid two fixes out of date.
+
 This also settles the walls-versus-holes question above for a real stack: nav2's
-10.88 m matches the obstacles-only figure, not the obstacles-and-holes one that
-had no path. Its inflation layer grows lethal obstacles, while unknown cells are
+9.75 m sits just above the obstacles-only figure over the same goal (9.55 m),
+not the obstacles-and-holes one that had no path. Its inflation layer grows lethal obstacles, while unknown cells are
 `NO_INFORMATION` and are simply not routed through. `scripts/isaac-sim/README.md`
 has the rest, including the WSL DDS problem that had to be solved first.
 

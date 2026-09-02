@@ -1,0 +1,117 @@
+{
+  "usd": "D:/Tyndall Labs/image2world/public/worlds/demo-office/export/demo-office.usdz",
+  "cell_size": 0.05,
+  "robot_height": 0.6,
+  "isaac_sim": "6.0.1-rc.7+release.42383.32955d8d.gl",
+  "world_size_m": [
+    7.599,
+    9.679,
+    2.64
+  ],
+  "floor_top_z": 0.169,
+  "floor_top_from": "the collider's floor part",
+  "omap": {
+    "grid": [
+      153,
+      192
+    ],
+    "occupied": 1561,
+    "free": 27516,
+    "cells": 29376
+  },
+  "clearance_probe": {
+    "used": "box",
+    "ray_blocked": 761,
+    "box_blocked": 1414,
+    "both": 761,
+    "box_only": 653,
+    "ray_only": 0
+  },
+  "border": {
+    "m": 0.5,
+    "cells": 10
+  },
+  "max_step": 0.1,
+  "step_edges": {
+    "cells": 75,
+    "m2": 0.19
+  },
+  "obstacle_blobs": {
+    "count": 13,
+    "largest_cells": 2699,
+    "specks_1_2_cells": 1,
+    "sizes": [
+      2,
+      4,
+      5,
+      6,
+      25,
+      39,
+      50,
+      115,
+      172,
+      174,
+      249,
+      373,
+      2699
+    ]
+  },
+  "robot_radius": 0.0,
+  "step_limit_sweep": {
+    "0.03": 6359,
+    "0.05": 6374,
+    "0.10": 6381,
+    "0.20": 6381
+  },
+  "reachability": {
+    "regions": 71,
+    "kept": 6381,
+    "dropped": 215,
+    "dropped_m2": 0.54,
+    "seed_cell": [
+      77,
+      15
+    ],
+    "world_origin_reachable": true
+  },
+  "walkable_ground_z": {
+    "floor_top": 0.1685,
+    "band_top": 0.2885,
+    "p0": 0.0085,
+    "p50": 0.0085,
+    "p95": 0.0085,
+    "p99": 0.0341,
+    "p100": 0.1284,
+    "before_filters": {
+      "p0": 0.0085,
+      "p50": 0.0085,
+      "p95": 0.0085,
+      "p99": 0.0391,
+      "p100": 0.1874
+    }
+  },
+  "raycast": {
+    "grid": [
+      172,
+      214
+    ],
+    "cast_from_z": 0.769,
+    "free": 6381,
+    "occupied": 3913,
+    "unknown": 26514,
+    "free_before_filters": 6671,
+    "free_m2": 15.95,
+    "occupied_m2": 9.78,
+    "unknown_m2": 66.29,
+    "unknown_holes": 19194,
+    "unknown_holes_m2": 47.99,
+    "unknown_border": 7320,
+    "origin": [
+      -4.611592067816673,
+      -2.2291096275821483,
+      0.0
+    ]
+  },
+  "navmap_png": "D:\\Tyndall Labs\\image2world\\public\\worlds\\demo-office\\export\\demo-office-navmap.png",
+  "navmap_yaml": "D:\\Tyndall Labs\\image2world\\public\\worlds\\demo-office\\export\\demo-office-navmap.yaml"
+}

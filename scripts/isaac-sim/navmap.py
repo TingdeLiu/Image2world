@@ -43,6 +43,12 @@ def read_yaml(path):
     `build_navmap.py` a few lines at a time, and parsing it the same simple way
     keeps the reader honest about what is actually in it.
     """
+    # A missing file gets the same treatment as a missing key or a missing
+    # image: a sentence, not a traceback. `pipeline.py` prints the tail of a
+    # failed stage, and a stack trace there says "this crashed" where the useful
+    # thing to say is "that world has no map yet".
+    if not os.path.isfile(path):
+        raise SystemExit(f"{path} does not exist -- has build_navmap.py been run?")
     out = {}
     with open(path, encoding="utf-8") as fh:
         for line in fh:

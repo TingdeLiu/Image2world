@@ -51,6 +51,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -91,9 +92,35 @@ parser.add_argument("--headless", action="store_true")
 parser.add_argument("--out", help="directory for the report and the overlay")
 parser.add_argument("--show-collider", action="store_true",
                     help="look at the collision mesh instead of the splat")
-parser.add_argument("--obstacle", action="append", metavar="X,Y[,SIZE]", default=[],
+parser.add_argument("--obstacle", action="append", metavar="X,Y[,SIZE[,HEIGHT]]",
+                    default=[],
                     help="drop a solid box into the scene that the map does not "
-                         "know about, to exercise the recovery behaviour. Repeatable")
+                         "know about, to exercise the recovery behaviour. HEIGHT "
+                         "defaults to SIZE, giving a cube; setting it lower makes "
+                         "a wide low ledge, which is a step to climb rather than a "
+                         "block to walk round. Repeatable")
+
+# `--goal -2.01,-3.93` is a usage error to argparse: the value starts with a
+# dash and is not a bare negative number, so it reads as an unknown flag and the
+# run dies in a usage dump. Half of any room's coordinates are negative, so this
+# is not an edge case -- pointing the robot at the left half of its own map was
+# a syntax error, and the fix on offer was to know to write `--goal=`.
+# Reattach the value instead, and only when it really is a coordinate.
+POINT_FLAGS = ("--goal", "--start", "--obstacle")
+POINT = re.compile(r"-?[0-9.]+(,-?[0-9.]+){1,3}$")
+rejoined, skip = [], False
+for i, token in enumerate(sys.argv[1:]):
+    if skip:
+        skip = False
+        continue
+    value = sys.argv[i + 2] if i + 2 < len(sys.argv) else None
+    if token in POINT_FLAGS and value and value.startswith("-") and POINT.match(value):
+        rejoined.append(f"{token}={value}")
+        skip = True
+    else:
+        rejoined.append(token)
+sys.argv[1:] = rejoined
+
 args = parser.parse_args()
 
 import numpy as np  # noqa: E402  -- before SimulationApp, which is fine and much faster
@@ -296,18 +323,22 @@ print(f"floor z={floor_z:.3f}, spawn {tuple(round(v, 3) for v in spawn)} ({args.
 # without a way to provoke it, it is aspiration rather than behaviour. A static
 # box in the scene and nothing in the map is the honest version of the case it
 # exists for: someone left a chair in the corridor after the survey.
-for spec in args.obstacle:
+for index, spec in enumerate(args.obstacle):
     numbers = [float(v) for v in spec.split(",")]
     ox, oy = numbers[0], numbers[1]
     side = numbers[2] if len(numbers) > 2 else 0.6
-    index = args.obstacle.index(spec)
+    # A cube is a block to walk round; a wide low box is a step to climb, and
+    # those are different questions. `--max-step` wants the second one and there
+    # was no way to ask it, so its default is inherited rather than measured.
+    tall = numbers[3] if len(numbers) > 3 else side
     cube = UsdGeom.Cube.Define(stage, f"/World/Obstacle_{index}")
     cube.CreateSizeAttr(1.0)
-    cube.AddTranslateOp().Set(Gf.Vec3d(ox, oy, floor_z + side / 2.0))
-    cube.AddScaleOp().Set(Gf.Vec3f(side, side, side))
+    cube.AddTranslateOp().Set(Gf.Vec3d(ox, oy, floor_z + tall / 2.0))
+    cube.AddScaleOp().Set(Gf.Vec3f(side, side, tall))
     # Collision but no rigid body: it is furniture, not a projectile.
     UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
-    print(f"dropped a {side:.2f} m box at ({ox}, {oy}) that the map does not have")
+    print(f"dropped a {side:.2f} x {side:.2f} x {tall:.2f} m box at ({ox}, {oy}) "
+          f"that the map does not have")
 
 robot = POLICY_CLASS(prim_path=f"/World/{args.robot}", position=spawn)
 policy_dt = getattr(robot, "_dt", None)

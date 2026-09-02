@@ -57,6 +57,14 @@ def test_read_yaml_parses_the_six_keys(tmp_path):
     assert meta["negate"] == 0
 
 
+def test_a_missing_file_is_refused_by_sentence(tmp_path):
+    """Not a traceback: `pipeline.py` shows the tail of a failed stage, and a
+    stack trace there hides the one useful fact -- that world has no map yet."""
+    with pytest.raises(SystemExit) as refused:
+        navmap.load(tmp_path / "nothing-here.yaml")
+    assert "does not exist" in str(refused.value)
+
+
 def test_a_missing_key_is_refused(tmp_path):
     write_map(tmp_path, [".."])
     path = tmp_path / "m.yaml"
@@ -93,6 +101,57 @@ def test_cell_and_world_round_trip(tmp_path):
             assert carte.cell_of(*carte.world_of(iy, ix)) == (iy, ix)
     # The origin names the *corner* of cell (0, 0), so its centre is half a cell in.
     assert carte.world_of(0, 0) == pytest.approx((-1.0 + 0.025, -2.0 + 0.025))
+
+
+# --------------------------------------------------------------------------
+# The one real map in the tree
+# --------------------------------------------------------------------------
+
+SAMPLE = (Path(__file__).resolve().parents[2] / "public" / "worlds" / "demo-office"
+          / "export" / "demo-office-navmap.yaml")
+
+
+@pytest.mark.skipif(not SAMPLE.is_file(), reason="the sample world's map is not here")
+def test_the_sample_world_map_agrees_with_its_own_build_report():
+    """Everything above this line is an ASCII picture drawn by the test.
+
+    `demo-office` is the sample world a fresh clone gets, and `pipeline.py` now
+    leaves its map in the tree -- a few kilobytes of real output from the real
+    builder. Reading it here costs nothing and catches the one thing synthetic
+    maps cannot: the PNG and the JSON drifting apart, which is what happens when
+    the writing changes and the reading does not. The numbers are not hardcoded,
+    because rebuilding the map legitimately changes them; what must not change
+    is that the two files still describe the same grid.
+    """
+    import json
+
+    carte = navmap.load(SAMPLE)
+    with open(SAMPLE.with_name(SAMPLE.name.replace(".yaml", ".json")),
+              encoding="utf-8") as fh:
+        built = json.load(fh)["raycast"]
+
+    assert [carte.width, carte.height] == built["grid"]
+    counts = carte.counts()
+    assert counts["free"] == built["free"]
+    assert counts["occupied"] == built["occupied"]
+    assert counts["unknown"] == built["unknown"]
+    assert carte.origin[:2] == pytest.approx(built["origin"][:2])
+
+
+@pytest.mark.skipif(not SAMPLE.is_file(), reason="the sample world's map is not here")
+def test_a_robot_could_cross_the_sample_world():
+    """The map is only worth shipping if something can be planned on it, and the
+    world origin is where the viewer drops a character -- so a route out of it
+    is the least a navigable map owes."""
+    carte = navmap.load(SAMPLE)
+    passable = carte.passable(0.35, avoid_unknown=True)
+    start = carte.cell_of(0.0, 0.0)
+    assert passable[start], "the spawn is not somewhere a 0.35 m robot can stand"
+    room = navmap.clearance(~passable, carte.resolution, cap_m=1.0)
+    goal = navmap.furthest_reachable(passable, start, room=room, min_clearance=0.2)
+    assert goal is not None
+    route = navmap.plan(passable, start, goal)
+    assert route is not None and len(route) > 10
 
 
 # --------------------------------------------------------------------------
