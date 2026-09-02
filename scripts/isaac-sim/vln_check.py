@@ -151,6 +151,8 @@ def main():
                         help="shortest route an episode may take, in graph hops")
     parser.add_argument("--out", help="directory for <slug>-vlngraph.json "
                                       "(default: beside the map)")
+    parser.add_argument("--no-png", action="store_true",
+                        help="skip the picture of the map with its graph on top")
     args = parser.parse_args()
 
     carte = navmap.load(args.yaml)
@@ -204,6 +206,9 @@ def main():
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     print(f"\nwrote {out_path}")
+    if not args.no_png:
+        print("wrote " + vlngraph.draw(carte, report,
+                                       os.path.join(out_dir, slug + "-vlngraph.png")))
 
 
 if __name__ == "__main__":

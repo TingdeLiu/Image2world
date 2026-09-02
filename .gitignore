@@ -95,7 +95,7 @@ __pycache__/
 # `test_vlngraph.py` rebuilds it from that map and asserts on what comes out.
 # Committing it as well would put a second copy of those numbers in the tree
 # with nothing comparing them, which is how the nav2 figures went stale.
-/public/worlds/demo-office/export/*-vlngraph.json
+/public/worlds/demo-office/export/*-vlngraph.*
 
 # `build_collider.py` keeps the collider it is about to replace, so rebuilding a
 # generative world is reversible. For a tracked world that copy is redundant --

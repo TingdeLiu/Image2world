@@ -220,6 +220,21 @@ def test_not_being_able_to_tell_is_not_a_pass():
                 and not [r for r in rows if r["met"] is None])
 
 
+def test_the_picture_covers_the_whole_map(tmp_path):
+    """The drawing is evidence, so it has to be of the map it claims to be."""
+    from PIL import Image
+
+    carte = walled(0.8)
+    report = vlngraph.build(carte, spacing_m=0.75)
+    out = vlngraph.draw(carte, report, tmp_path / "g.png", width=400)
+    picture = Image.open(out)
+    assert picture.width % carte.width == 0
+    assert picture.height % carte.height == 0
+    assert picture.width // carte.width == picture.height // carte.height
+    # The graph is drawn on it, so the red of a viewpoint has to be there.
+    assert (220, 40, 40) in {c for _, c in picture.convert("RGB").getcolors(1 << 16)}
+
+
 def test_every_criterion_has_a_remedy():
     report = vlngraph.build(box(), spacing_m=0.75)
     for row in vln_check.verdict(report):

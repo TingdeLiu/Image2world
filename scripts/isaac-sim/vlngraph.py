@@ -303,6 +303,47 @@ def build(carte, spacing_m=1.0, max_edge_m=2.5, robot_radius=0.25,
     }
 
 
+def draw(carte, report, path, width=900):
+    """The map with its graph on top, because the verdict should be checkable.
+
+    `marble-office` scoring 1.03 is a number until you see the picture: an
+    L-shaped hall with no interior walls and a nearly complete graph across the
+    middle of it. That is one glance against a paragraph of argument, and it is
+    also how you would catch the opposite mistake -- a map whose walls the
+    reconstruction lost would score 1.03 too, and look nothing like this.
+    """
+    from PIL import Image, ImageDraw
+
+    # Row 0 of the grid is the lowest y; a picture wants it at the bottom.
+    grid = np.flipud(carte.grid)
+    rgb = np.zeros(grid.shape + (3,), dtype=np.uint8)
+    rgb[grid == navmap.UNKNOWN] = (60, 60, 66)
+    rgb[grid == navmap.OCCUPIED] = (20, 20, 24)
+    rgb[grid == navmap.FREE] = (232, 232, 227)
+    radius = report["settings"]["robot_radius_m"]
+    rgb[np.flipud(carte.passable(robot_radius=radius, avoid_unknown=False))] = (250, 250, 245)
+
+    scale = max(1, int(width / max(grid.shape)))
+    image = Image.fromarray(rgb).resize(
+        (grid.shape[1] * scale, grid.shape[0] * scale), Image.NEAREST)
+    pen = ImageDraw.Draw(image)
+    rows = grid.shape[0]
+
+    def point(cell):
+        iy, ix = cell
+        return ((ix + 0.5) * scale, (rows - 1 - iy + 0.5) * scale)
+
+    nodes = report["_nodes"]
+    for (i, j, _) in report["_edges"]:
+        pen.line([point(nodes[i]), point(nodes[j])], fill=(0, 130, 220), width=1)
+    for cell in nodes:
+        x, y = point(cell)
+        r = max(2, scale)
+        pen.ellipse([x - r, y - r, x + r, y + r], fill=(220, 40, 40))
+    image.save(path)
+    return path
+
+
 def to_world(carte, report):
     """The report with cell indices replaced by metres, ready to serialise."""
     nodes = [carte.world_of(iy, ix) for (iy, ix) in report["_nodes"]]
