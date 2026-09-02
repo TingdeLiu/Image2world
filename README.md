@@ -225,8 +225,9 @@ transform chain is written out in
 A generated world can also leave the browser: the USD export drives it into
 Isaac Sim as a navigable environment, with the Gaussian splat as the camera's
 view and the collision mesh as PhysX geometry. The whole chain — export, build
-the occupancy map, check it under `map_server`'s rules, plan on it with nav2,
-and drive a robot along the plan — runs as one command:
+the occupancy map, check it under `map_server`'s rules, judge whether it is
+good enough to train a VLN agent on, plan on it with nav2, and drive a robot
+along the plan — runs as one command:
 
 ```bash
 python scripts/isaac-sim/pipeline.py demo-office
@@ -234,6 +235,11 @@ python scripts/isaac-sim/pipeline.py demo-office
 
 Steps, measured results, and the version that matters are in
 [the Isaac Sim notes](./docs/ISAAC_SIM.md).
+
+The driving works. The VLN bar does not: no world here clears it, and the two
+that get furthest fail for opposite reasons — one is too small, the other too
+open for any route to need a turn. The gate says which, and why.
+
 
 ## Architecture
 
