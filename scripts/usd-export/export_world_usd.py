@@ -173,7 +173,9 @@ class WorldSource:
     slug: str
     display_name: str
     version_index: int
-    splat_path: Path
+    # None only under --no-splat, where nothing reads it: both consumers sit
+    # inside `if include_splat`.
+    splat_path: Path | None
     splat_lod: str
     collider_path: Path | None
     flip_y: bool
@@ -183,7 +185,8 @@ class WorldSource:
     scene: dict[str, Any]
 
 
-def resolve_world(slug: str, requested_lod: str) -> WorldSource:
+def resolve_world(slug: str, requested_lod: str, *,
+                  need_splat: bool = True) -> WorldSource:
     world_root = WORLDS_DIR / slug
     if not world_root.is_dir():
         fail(f"world '{slug}' not found under {WORLDS_DIR}")
@@ -201,11 +204,17 @@ def resolve_world(slug: str, requested_lod: str) -> WorldSource:
         if f.index == latest.index and f.extension in SPLAT_EXTENSIONS and f.slug.startswith("world-")
     ]
     by_lod = {f.slug[len("world-") :]: f for f in splats}
-    if not by_lod:
+    if not by_lod and need_splat:
         fail(f"no background splat (<n>-world-<lod>.ply/.spz) for version {latest.index} in {world_dir}")
 
     lod = requested_lod
-    if lod not in by_lod:
+    if not by_lod:
+        # --no-splat, and there is none. The collider alone is a whole world
+        # as far as Isaac Sim is concerned -- `build_navmap.py` never looks at
+        # the splat -- and refusing here made it impossible to export a world
+        # that has collision geometry and no appearance.
+        lod = ""
+    elif lod not in by_lod:
         fallback = next((candidate for candidate in reversed(LOD_CHOICES) if candidate in by_lod), None)
         if fallback is None:
             fallback = sorted(by_lod)[0]
@@ -240,7 +249,7 @@ def resolve_world(slug: str, requested_lod: str) -> WorldSource:
         slug=slug,
         display_name=str(project.get("display_name") or manifest.get("display_name") or slug),
         version_index=latest.index,
-        splat_path=by_lod[lod].path,
+        splat_path=by_lod[lod].path if by_lod else None,
         splat_lod=lod,
         collider_path=collider,
         flip_y=bool(semantics.get("flip_y", True)),
@@ -729,7 +738,7 @@ def main() -> None:
 
     require_dependencies(need_splat=not args.no_splat)
 
-    world = resolve_world(args.slug, args.lod)
+    world = resolve_world(args.slug, args.lod, need_splat=not args.no_splat)
     placements = [] if args.no_objects else resolve_placements(world)
     print(f"Exporting '{world.display_name}' (v{world.version_index}) with {len(placements)} object(s)")
     if not args.no_collider and world.collider_path is None:

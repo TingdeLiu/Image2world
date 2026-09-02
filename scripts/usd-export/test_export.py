@@ -252,6 +252,47 @@ def _synthetic_world(root, slug, semantics):
     return root
 
 
+def test_a_world_with_no_splat_exports_under_no_splat(tmp_path, monkeypatch):
+    """`--no-splat` has to mean it. It did not.
+
+    `resolve_world` failed with "no background splat" whatever the flag said, so
+    a world that has collision geometry and no appearance could not be exported
+    at all -- which is exactly what a synthetic fixture is, and what
+    `build_navmap.py` needs, since it never looks at the splat. The flag's own
+    comment already said these runs "never touch it".
+    """
+    root = tmp_path / "bare"
+    world_dir = root / "rooms" / "output" / "world"
+    world_dir.mkdir(parents=True)
+    (world_dir / "0-world.glb").write_bytes(b"")
+    (world_dir / "0-world.json").write_text(
+        json.dumps({"assets": {"splats": {"semantics_metadata": {}}}}),
+        encoding="utf-8")
+    monkeypatch.setattr(exporter, "WORLDS_DIR", root)
+
+    world = exporter.resolve_world("rooms", "500k", need_splat=False)
+    assert world.splat_path is None
+    assert world.collider_path is not None
+
+
+def test_a_world_with_no_splat_still_fails_when_one_is_wanted(tmp_path, monkeypatch):
+    """The other half, so the fix does not quietly disarm the check.
+
+    Without `--no-splat` the splat is the point of the export, and a missing one
+    is still a refusal rather than a stage that succeeds and writes nothing.
+    """
+    root = tmp_path / "bare"
+    world_dir = root / "rooms" / "output" / "world"
+    world_dir.mkdir(parents=True)
+    (world_dir / "0-world.json").write_text(
+        json.dumps({"assets": {"splats": {"semantics_metadata": {}}}}),
+        encoding="utf-8")
+    monkeypatch.setattr(exporter, "WORLDS_DIR", root)
+
+    with pytest.raises(SystemExit):
+        exporter.resolve_world("rooms", "500k")
+
+
 def test_resolve_world_reads_rotation_x(tmp_path, monkeypatch):
     """A Nerfstudio world arrives as flip_y false plus an explicit rotation."""
     monkeypatch.setattr(

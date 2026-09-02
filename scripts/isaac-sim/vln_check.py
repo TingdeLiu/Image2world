@@ -57,6 +57,13 @@ alone. "Every world is one open room" -- which is what the first draft of this
 file said -- was reading a bug that had viewpoints standing 0.5 m from every
 wall, and so was blind to exactly the routes that go round things.
 
+That every captured world fails is a statement about the captures, not about
+these thresholds: `reference-rooms`, a synthetic five-room fixture built by
+`make_reference_world.py` and put through the same unmodified chain, meets all
+five -- 212 viewpoints in one component, detour p90 2.36, 100 episodes at a
+median of 12.5 m over 8 hops. A gate that had only ever refused would have been
+indistinguishable from an unreachable one.
+
 The verdict is written to JSON and printed; the exit code stays 0 unless
 something actually broke. A world that is honestly too small is a finding, not
 a crash, and `pipeline.py` already learned once that judging a stage by its exit

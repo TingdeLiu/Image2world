@@ -1,0 +1,7 @@
+{
+  "slug": "reference-rooms",
+  "display_name": "Reference rooms",
+  "created_at": "2026-09-03T00:00:00.000Z",
+  "updated_at": "2026-09-03T00:00:00.000Z",
+  "notes": "Synthetic fixture, not a reconstruction and not training data. Five rooms off a corridor, built by scripts/isaac-sim/make_reference_world.py so the pipeline's success path can be exercised."
+}

@@ -296,6 +296,50 @@ def test_the_sample_world_fails_on_connectivity_and_yield():
     assert rows["episodes"]["met"] is False
 
 
+REFERENCE = (Path(__file__).resolve().parents[2] / "public" / "worlds"
+             / "reference-rooms" / "export" / "reference-rooms-navmap.yaml")
+
+
+@pytest.mark.skipif(not REFERENCE.is_file(), reason="reference fixture not checked out")
+def test_a_real_isaac_build_can_pass_every_criterion():
+    """The one test that stops this whole file being a gate that only refuses.
+
+    Every *generated* world in the tree fails, and until `reference-rooms`
+    existed nothing distinguished "these captures are single rooms" from "the
+    gate cannot say yes to anything an Isaac Sim build produces". The synthetic
+    ones above cannot settle it either: they are numpy arrays this file wrote,
+    so they never touch the exporter, PhysX, or `build_navmap.py`.
+
+    This map did. `make_reference_world.py` writes a GLB of five rooms off a
+    corridor, and the unmodified `export -> map -> check -> vln` chain turns it
+    into 212 viewpoints in one component with a detour p90 of 2.36 and 100
+    episodes at a median of 12.5 m over 8 hops -- R2R's own shape.
+    """
+    carte = navmap.load(str(REFERENCE))
+    report = vlngraph.build(carte, spacing_m=0.75, robot_radius=0.25,
+                            min_hops=4, episode_range=(3.0, 20.0), episodes=100)
+    rows = vln_check.verdict(report)
+    assert all(row["met"] is True for row in rows), \
+        [(row["criterion"], row["value"]) for row in rows if row["met"] is not True]
+
+
+@pytest.mark.skipif(not REFERENCE.is_file(), reason="reference fixture not checked out")
+def test_the_reference_world_is_the_shape_the_captures_are_not():
+    """What separates it from every capture here, stated as numbers.
+
+    Doorways are what makes a building a graph. `marble-office` has the scale --
+    99 viewpoints -- and 3.7% of its viewpoint pairs have to go round anything,
+    because it is one hall. This has five rooms on a corridor, and most pairs do.
+    """
+    carte = navmap.load(str(REFERENCE))
+    report = vlngraph.build(carte, spacing_m=0.75, robot_radius=0.25)
+    assert report["components"] == 1
+    assert report["detour_over_1_25"] > 0.5
+    # Mean degree well under the node count: rooms connect through doors, not
+    # by everything seeing everything, which is what `marble-office` does at 17.6.
+    assert report["mean_degree"] < report["nodes"] / 4
+
+
 @pytest.mark.skipif(not SAMPLE.is_file(), reason="sample world not checked out")
 def test_the_sample_world_exports_a_serialisable_graph():
     carte = navmap.load(str(SAMPLE))

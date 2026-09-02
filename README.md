@@ -236,10 +236,13 @@ python scripts/isaac-sim/pipeline.py demo-office
 Steps, measured results, and the version that matters are in
 [the Isaac Sim notes](./docs/ISAAC_SIM.md).
 
-The driving works. The VLN bar does not: no world here clears it, and no two of
-them miss it on the same criterion — one is too open for a route to need a turn,
-one is structured but too small to yield episodes, one is in pieces. The gate
-says which, and why, and draws the graph so the verdict can be checked by eye.
+The driving works. The VLN bar is a different matter: none of the eight captured
+worlds clears it, and no single criterion explains why — one is too open for a
+route to need a turn, one is structured but too small to yield episodes, one is
+in pieces. A synthetic five-room fixture put through the same unmodified chain
+*does* clear it, 5/5, which places the limit on what gets captured rather than on
+the map builder. The gate says which criterion fails, why, and draws the graph so
+the verdict can be checked by eye.
 
 
 ## Architecture
