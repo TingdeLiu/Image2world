@@ -1,6 +1,6 @@
 """Run the whole generated-world -> navigable-map pipeline, and say what broke.
 
-    export  ->  map  ->  check  ->  nav2  ->  drive
+    export  ->  map  ->  check  ->  vln  ->  nav2  ->  drive
 
 Every stage of this already existed and every stage was documented, as a list of
 commands for a person to type in order. Nothing ran the list. Two things follow
@@ -41,7 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 WORLDS = os.path.join(ROOT, "public", "worlds")
 
-STAGES = ("export", "map", "check", "nav2", "drive")
+STAGES = ("export", "map", "check", "vln", "nav2", "drive")
 
 # The patterns that turn each stage's stdout into the report, named rather than
 # written inline so `test_pipeline.py` can exercise *these* and not a copy of
@@ -63,6 +63,9 @@ SAYS = {
     # `build_navmap.py` marks a deliberate refusal so it does not arrive here as
     # a bare `exit 1` with the reason buried in Kit's log.
     "refused": r"REFUSED: (?P<why>[^\n]+)",
+    "vln": (r"VLN-READY: (?P<ready>yes|no) \((?P<met>\d+)/(?P<total>\d+) "
+            r"criteria met"),
+    "viewpoints": (r"graph\s+(?P<viewpoints>\d+) viewpoints, (?P<links>\d+) edges"),
 }
 
 
@@ -239,7 +242,7 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
             # green against a map built an hour earlier under different code.
             # `--skip map` is deliberately not affected -- re-checking an
             # existing map is what that flag is for.
-            skip = skip | {"check", "nav2", "drive"}
+            skip = skip | {"check", "vln", "nav2", "drive"}
             print(f"  .. the map did not build, so check/nav2/drive are not run "
                   f"against the {slug} map that was already on disk")
 
@@ -248,6 +251,21 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
         stage.pick(SAYS["route"], "cells", "metres")
         if stage.status == "ok" and "counts match" not in stage.output:
             stage.status = "counts did not match the build"
+
+    # Whether the map is good enough to *train* on, which is a different and
+    # much higher bar than whether a planner can cross it -- and one every world
+    # in this tree currently misses. Deliberately not fatal to the stages below:
+    # a map that is too small for a dataset is still a map nav2 can drive, and
+    # conflating the two would stop reporting the driving result that has been
+    # green all along.
+    stage = add("vln", [sys.executable, os.path.join(HERE, "vln_check.py"), yaml])
+    if stage:
+        stage.pick(SAYS["viewpoints"], "viewpoints", "links")
+        stage.pick(SAYS["vln"], "ready", "met", "total")
+        if stage.status == "ok" and stage.notes.get("ready") != "yes":
+            missed = re.findall(r"^  (\w+) -- ", stage.output, re.M)
+            stage.status = ("not VLN-ready: "
+                            + (", ".join(missed) if missed else "see its output"))
 
     # nav2's goal comes from the map, not from memory. A hardcoded one is what
     # went stale: the recorded goal (3.79, 9.02) became an unknown cell two map

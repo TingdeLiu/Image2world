@@ -196,7 +196,8 @@ def test_a_multi_word_result_is_read_whole():
 def test_the_patterns_the_tests_use_are_the_ones_the_runner_uses():
     """The point of `SAYS`. Every name the stages ask for must exist."""
     assert set(pipeline.SAYS) == {"probe", "cells", "route", "poses", "result",
-                                  "tracking", "distance", "size", "refused"}
+                                  "tracking", "distance", "size", "refused",
+                                  "vln", "viewpoints"}
 
 
 def test_a_refusal_is_read_out_of_the_stage_output():
@@ -230,7 +231,7 @@ def test_a_fallen_robot_is_not_read_as_arrival():
 def test_every_stage_name_is_known_to_the_skip_flag():
     """`--skip` validates against this tuple, so a stage missing from it could
     never be skipped and a typo in it would silently skip nothing."""
-    assert pipeline.STAGES == ("export", "map", "check", "nav2", "drive")
+    assert pipeline.STAGES == ("export", "map", "check", "vln", "nav2", "drive")
 
 
 def test_find_isaac_prefers_what_it_was_told():
