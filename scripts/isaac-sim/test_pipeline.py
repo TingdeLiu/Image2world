@@ -44,6 +44,22 @@ def test_backslashes_are_translated_too():
     assert pipeline.wsl_path(r"D:\a\b\c.yaml") == "/mnt/d/a/b/c.yaml"
 
 
+def test_a_windows_path_translates_on_a_posix_host_too(monkeypatch):
+    """These tests passed on Windows and failed in CI, which runs Linux.
+
+    `wsl_path` used to call `os.path.abspath` first. On Linux `D:/a/b` is a
+    *relative* path, so that returned `<cwd>/D:/a/b`, the drive letter was no
+    longer in position 1, and the translation silently did nothing. Standing in
+    for the other host is the only way to catch that from either one.
+    """
+    import posixpath
+    monkeypatch.setattr("os.path.abspath",
+                        lambda path: posixpath.normpath(
+                            posixpath.join("/home/runner/work/repo", path)))
+    assert pipeline.wsl_path("D:/a/b.yaml") == "/mnt/d/a/b.yaml"
+    assert pipeline.wsl_path("C:/x/y.sh") == "/mnt/c/x/y.sh"
+
+
 def test_a_path_with_no_drive_letter_is_left_alone():
     # os.path.abspath will have made it absolute against the cwd; the point is
     # that nothing is mangled when there is no drive letter to translate.

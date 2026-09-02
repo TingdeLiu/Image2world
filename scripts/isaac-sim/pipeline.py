@@ -130,8 +130,19 @@ def foreign_python_env():
 
 
 def wsl_path(windows_path):
-    """C:/x/y -> /mnt/c/x/y, which is the translation nav2_check.sh needs."""
-    full = os.path.abspath(windows_path).replace("\\", "/")
+    """C:/x/y -> /mnt/c/x/y, which is the translation nav2_check.sh needs.
+
+    The drive letter is looked for *before* `abspath`, so this translates a
+    Windows path wherever it runs. Calling `abspath` first only works on
+    Windows: on Linux `D:/a/b` is a relative path, so it comes back as
+    `<cwd>/D:/a/b` and the drive letter is no longer in position 1. That is not
+    a hypothetical -- the tests for this ran on Windows and failed in CI.
+    """
+    full = str(windows_path).replace("\\", "/")
+    if not (len(full) > 1 and full[1] == ":"):
+        # Relative, or already POSIX. Resolving against the working directory is
+        # what supplies the drive letter on Windows.
+        full = os.path.abspath(full).replace("\\", "/")
     if len(full) > 1 and full[1] == ":":
         return "/mnt/" + full[0].lower() + full[2:]
     return full
