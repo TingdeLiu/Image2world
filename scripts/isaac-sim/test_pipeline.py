@@ -184,7 +184,7 @@ def test_the_drive_stage_reads_the_result_and_the_tracking():
 
 
 def test_a_multi_word_result_is_read_whole():
-    """The pattern used to be `\w+`, which caught only the first word and
+    r"""The pattern used to be `\w+`, which caught only the first word and
     reported a failed run as `result=did` -- a parsing accident that reads like
     a robot state. This test uses the module's own pattern, so replacing it with
     a narrower one fails here rather than quietly degrading the report."""
