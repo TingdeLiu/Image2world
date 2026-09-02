@@ -102,4 +102,5 @@ jobs:
             backend/test_unload.py \
             scripts/usd-export/test_export.py \
             scripts/isaac-sim/test_navmap.py \
-            scripts/isaac-sim/test_pipeline.py
+            scripts/isaac-sim/test_pipeline.py \
+            scripts/isaac-sim/test_vlngraph.py
