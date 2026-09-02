@@ -712,16 +712,34 @@ the fault.
   `marble-office` — but it is the reason this map still reads larger than that
   tool's.
 
-  Measured on the world where it should hurt most, and it does not.
-  `multiview-meetingroom` comes apart into **298 free regions**, the fill keeps
-  17.6 m² and drops 21.1 m² — more than it keeps. Letting the fill cross
-  isolated obstacle blobs of ≤ 2 and ≤ 4 cells recovered **nothing**: 7059
-  cells kept either way. The reason is that **77% of those stranded regions'
-  boundary is unknown rather than obstacle**, and 108 of the 297 are bounded by
-  unknown alone — islands of floor with no floor around them, 159 of them a
-  single cell. They are correctly dropped. Despeckling is not what is standing
-  between this world and a usable map; the reconstruction covering a camera's
-  wedge rather than a room is.
+  Measured on the world where it should hurt most, twice, and neither answer
+  says to add one. `multiview-meetingroom` comes apart into **298 free
+  regions**, the fill keeps 17.6 m² and drops 21.1 m² — more than it keeps.
+
+  *Bridging obstacle specks* — letting the fill cross isolated blobs of ≤ 2 and
+  ≤ 4 cells — recovers **nothing**: 7059 cells kept either way. **77% of those
+  stranded regions' boundary is unknown rather than obstacle**, 108 of the 297
+  are bounded by unknown alone, and 159 are a single cell. Wrong instrument:
+  what `build_walkable.py` actually closes is gaps in the *floor*, not blobs of
+  obstacle.
+
+  *Bridging gaps in the floor* recovers 5.93 m², and cannot be shipped as such.
+  It only widens what the fill may cross, so the map keeps floor the **planner**
+  still cannot reach: with it on, `check_navmap.py` on `marble-office` reports
+  `NO PATH … the free space is not connected at this radius`. That is precisely
+  the "unreachable scraps shown as walkable" the reachability filter exists to
+  prevent, arrived at from the other direction.
+
+  Making it coherent means writing the gap cells into the map as free, and every
+  variant that recovers the 5.9 m² invents 6.7–7.4 m² doing it — a closing of
+  0.30 m fills 7.40 m², filling only cells with measured floor on both sides
+  needs 0.40 m and fills 6.71 m². **Roughly one fabricated square metre per
+  recovered one**, in a world whose surroundings genuinely have no floor.
+
+  So the gaps cutting that world up are not pinholes. They are 0.3–0.4 m of
+  floor the reconstruction never saw, and the 21.1 m² is correctly dropped. The
+  limitation stands, and what is standing between this world and a usable map is
+  the reconstruction covering a camera's wedge rather than a room.
 * **One height threshold** separates floor from obstacle, so a gentle ramp reads
   as floor along its whole length.
 * **The exporter never states a mesh collision approximation.** It applies
