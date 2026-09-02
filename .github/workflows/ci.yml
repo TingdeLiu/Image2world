@@ -55,6 +55,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest numpy scipy scikit-image trimesh fastapi python-multipart usd-core
 
+      # `scripts/isaac-sim/test_pipeline.py` needs none of the four toolchains
+      # `pipeline.py` drives. What it pins is the Windows -> WSL path
+      # translation and the regexes that turn each stage's stdout into the
+      # report -- if one of those stops matching, the report goes quietly blank
+      # instead of red, which is the same shape as every other bug this
+      # directory has produced.
+      #
       # `scripts/isaac-sim/test_navmap.py` needs neither OpenUSD nor Isaac Sim:
       # `navmap` is the map reading and the planner that `check_navmap.py` and
       # `navigate.py` share, so it is the piece where a change quietly makes the
@@ -94,4 +101,5 @@ jobs:
             backend/test_reconstruction_jobs.py \
             backend/test_unload.py \
             scripts/usd-export/test_export.py \
-            scripts/isaac-sim/test_navmap.py
+            scripts/isaac-sim/test_navmap.py \
+            scripts/isaac-sim/test_pipeline.py
