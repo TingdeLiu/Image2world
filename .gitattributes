@@ -1,0 +1,7 @@
+# `core.autocrlf=true` is the norm on a Windows checkout, and it rewrites these
+# on the way out of the object store. A shell script with CRLF line endings is
+# not a shell script to WSL: `nav2_check.sh` died on `syntax error near
+# unexpected token $'do\r'`, which reads like a bug in the script rather than in
+# how it was checked out. The nav2 step is the one that shows the map works in a
+# real ROS stack, so it needs to survive being cloned on Windows.
+*.sh text eol=lf
