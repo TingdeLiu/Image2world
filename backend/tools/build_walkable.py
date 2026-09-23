@@ -51,6 +51,44 @@ FLOOR_SKIRT = 0.20
 DESPECKLE_ITERATIONS = 1
 
 
+def rasterize_floor(
+    triangles: np.ndarray,
+    origin: np.ndarray,
+    shape: tuple[int, int],
+    cell_size: float,
+) -> np.ndarray:
+    """Lowest supported height at each cell centre, without random floor holes.
+
+    Project each actual floor triangle into the grid and interpolate its height.
+    This also handles the two large triangles left by decimating a flat floor.
+    No closing or interpolation between triangles is used: real gaps stay empty.
+    """
+    heights = np.full(shape, np.inf)
+    for triangle in triangles:
+        planar = (triangle[:, [0, 2]] - origin) / cell_size
+        a, b, c = planar
+        ab, ac = b - a, c - a
+        determinant = ab[0] * ac[1] - ab[1] * ac[0]
+        if abs(determinant) < 1e-12:
+            continue  # A vertical/degenerate face cannot support a person.
+        low = np.maximum(np.ceil(planar.min(axis=0) - 0.5).astype(int), 0)
+        high = np.minimum(np.floor(planar.max(axis=0) - 0.5).astype(int), [shape[1] - 1, shape[0] - 1])
+        if (low > high).any():
+            continue
+        # Bound scratch arrays even for very large, decimated floor triangles.
+        for row_start in range(low[1], high[1] + 1, 64):
+            rows, cols = np.mgrid[row_start:min(row_start + 64, high[1] + 1), low[0]:high[0] + 1]
+            dx, dz = cols + 0.5 - a[0], rows + 0.5 - a[1]
+            u = (dx * ac[1] - dz * ac[0]) / determinant
+            v = (ab[0] * dz - ab[1] * dx) / determinant
+            inside = (u >= -1e-10) & (v >= -1e-10) & (u + v <= 1.0 + 1e-10)
+            values = triangle[0, 1] + u[inside] * (triangle[1, 1] - triangle[0, 1]) + v[inside] * (triangle[2, 1] - triangle[0, 1])
+            y, x = rows[inside], cols[inside]
+            heights[y, x] = np.minimum(heights[y, x], values)
+    heights[~np.isfinite(heights)] = np.nan
+    return heights
+
+
 def walkable_grid(
     mesh: trimesh.Trimesh,
     standable_faces: np.ndarray,
@@ -79,21 +117,30 @@ def walkable_grid(
         surface = mesh if faces is None else mesh.submesh([faces], append=True)
         if surface.area <= 0:
             return np.empty((0, 3))
-        # ~4 samples per cell, so a cell is missed only if it is barely grazed.
+        # Bounded headroom sampling; thin obstacles can still be missed, so
+        # this is a minimap precheck, not a substitute for simulator collision.
         count = int(np.clip(np.ceil(surface.area / (cell_size * cell_size) * 4), 1_000, 400_000))
-        points = np.asarray(trimesh.sample.sample_surface(surface, count)[0], dtype=np.float64)
+        # Headroom remains an area-sampled approximation. A local fixed seed
+        # makes it repeatable without changing any caller's global RNG state.
+        points = np.asarray(trimesh.sample.sample_surface(surface, count, seed=0)[0], dtype=np.float64)
         points[:, 1] *= sign
         points[:, 2] *= sign
         return points
 
-    all_points = viewer_samples(None)
-    standable_points = viewer_samples(standable_faces) if len(standable_faces) else np.empty((0, 3))
-    centres = all_points
-
-    lower = centres.min(axis=0)
-    upper = centres.max(axis=0)
+    if not np.isfinite(cell_size) or cell_size <= 0:
+        raise ValueError("cell_size must be finite and positive")
+    vertices = np.array(mesh.vertices, dtype=np.float64, copy=True)
+    if not len(vertices) or not np.isfinite(vertices).all():
+        raise ValueError("collider must have finite vertices")
+    vertices[:, 1:] *= sign
+    # Sampling must never decide map placement or move a spawn between cells.
+    lower = vertices.min(axis=0)
+    upper = vertices.max(axis=0)
     cols = max(1, int(np.ceil((upper[0] - lower[0]) / cell_size)))
     rows = max(1, int(np.ceil((upper[2] - lower[2]) / cell_size)))
+    if rows * cols > 4_000_000:
+        raise ValueError("walkable grid too large; check reconstruction scale or crop distant geometry")
+    all_points = viewer_samples(None)
 
     def cell_of(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         col = np.clip(((points[:, 0] - lower[0]) / cell_size).astype(np.int32), 0, cols - 1)
@@ -102,11 +149,9 @@ def walkable_grid(
 
     # Standing height per cell: the *lowest* standable surface, so a desktop
     # does not hide the floor it stands on.
-    floor_height = np.full((rows, cols), np.inf)
-    if len(standable_points):
-        row, col = cell_of(standable_points)
-        np.minimum.at(floor_height, (row, col), standable_points[:, 1])
-    floor_height[np.isinf(floor_height)] = np.nan
+    floor_height = rasterize_floor(
+        vertices[mesh.faces[standable_faces]], lower[[0, 2]], (rows, cols), cell_size,
+    )
 
     # Headroom: the lowest thing overhead that is not the floor itself. The
     # skirt keeps a surface from reading as its own ceiling -- see FLOOR_SKIRT

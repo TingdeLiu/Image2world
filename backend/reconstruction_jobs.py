@@ -53,9 +53,49 @@ VIDEO_CONTENT_TYPES = {
     "application/octet-stream",
 }
 QUALITY_PROFILES: dict[str, dict[str, int | float]] = {
-    "preview": {"target_frames": 140, "iterations": 7_000, "camera_scale": 0.5},
-    "standard": {"target_frames": 280, "iterations": 20_000, "camera_scale": 0.75},
-    "quality": {"target_frames": 400, "iterations": 30_000, "camera_scale": 0.75},
+    "preview": {
+        "target_frames": 140,
+        "iterations": 7_000,
+        "camera_scale": 0.5,
+        "frames_per_window": 2,
+        "sequential_overlap": 5,
+        "min_registration_rate": 0.0,
+        "min_registered_frames": 0,
+        "min_trajectory_coverage": 0.0,
+    },
+    "standard": {
+        "target_frames": 280,
+        "iterations": 20_000,
+        "camera_scale": 0.75,
+        "frames_per_window": 2,
+        "sequential_overlap": 5,
+        "min_registration_rate": 0.0,
+        "min_registered_frames": 0,
+        "min_trajectory_coverage": 0.0,
+    },
+    "quality": {
+        "target_frames": 400,
+        "iterations": 30_000,
+        "camera_scale": 0.75,
+        "frames_per_window": 1,
+        "sequential_overlap": 6,
+        "min_registration_rate": 0.0,
+        "min_registered_frames": 0,
+        "min_trajectory_coverage": 0.0,
+    },
+    # This is deliberately a separate profile: navigation needs coverage and
+    # a connected camera track, so it trades GPU time for more overlap and
+    # rejects partial captures before they become published worlds.
+    "navigation": {
+        "target_frames": 480,
+        "iterations": 45_000,
+        "camera_scale": 0.75,
+        "frames_per_window": 1,
+        "sequential_overlap": 8,
+        "min_registration_rate": 0.75,
+        "min_registered_frames": 24,
+        "min_trajectory_coverage": 0.05,
+    },
 }
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -199,6 +239,11 @@ class ReconstructionJobManager:
             "target_frames": profile["target_frames"],
             "iterations": profile["iterations"],
             "camera_scale": profile["camera_scale"],
+            "frames_per_window": profile["frames_per_window"],
+            "sequential_overlap": profile["sequential_overlap"],
+            "min_registration_rate": profile["min_registration_rate"],
+            "min_registered_frames": profile["min_registered_frames"],
+            "min_trajectory_coverage": profile["min_trajectory_coverage"],
             "uploaded_bytes": 0,
             "resumable": False,
             "cancel_requested": False,
@@ -301,6 +346,18 @@ class ReconstructionJobManager:
                     state = self._read(job_id)
                     if state.get("cancel_requested"):
                         return
+                    profile = QUALITY_PROFILES.get(str(state.get("quality")), QUALITY_PROFILES["standard"])
+                    # Jobs created before the navigation profile was added can
+                    # still be resumed; fill in the new knobs from their saved
+                    # quality name instead of failing on a missing key.
+                    for key in (
+                        "frames_per_window",
+                        "sequential_overlap",
+                        "min_registration_rate",
+                        "min_registered_frames",
+                        "min_trajectory_coverage",
+                    ):
+                        state.setdefault(key, profile[key])
                     state.update(
                         {
                             "status": "running",
@@ -326,6 +383,16 @@ class ReconstructionJobManager:
                     str(state["iterations"]),
                     "--camera-scale",
                     str(state["camera_scale"]),
+                    "--frames-per-window",
+                    str(state["frames_per_window"]),
+                    "--sequential-overlap",
+                    str(state["sequential_overlap"]),
+                    "--min-registration-rate",
+                    str(state["min_registration_rate"]),
+                    "--min-registered-frames",
+                    str(state["min_registered_frames"]),
+                    "--min-trajectory-coverage",
+                    str(state["min_trajectory_coverage"]),
                     "--save-every",
                     "5000",
                     "--eval-every",
@@ -417,6 +484,11 @@ class ReconstructionJobManager:
                             "message": "Gaussian world ready",
                             "detail": f"{prototype.get('gaussian_count', 0):,} Gaussians",
                             "registered_frames": prototype.get("registered_frames"),
+                            "extracted_frames": prototype.get("extracted_frames"),
+                            "registration_rate": prototype.get("registration_rate"),
+                            "trajectory_span": prototype.get("trajectory_span"),
+                            "trajectory_length": prototype.get("trajectory_length"),
+                            "trajectory_coverage": prototype.get("trajectory_coverage"),
                             "gaussian_count": prototype.get("gaussian_count"),
                             "output_bytes": prototype.get("output_bytes"),
                             "output_ply": str(output_ply),

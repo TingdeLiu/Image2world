@@ -22,6 +22,8 @@ const PLY_LOD_TARGETS = [
   ['100k', 100_000],
 ] as const
 const NERFSTUDIO_ROTATION_X = -Math.PI / 2
+const MIN_NAV_WALKABLE_AREA = 1
+const MIN_NAV_REACHABILITY = 0.4
 
 interface ReconstructionJob {
   id: string
@@ -32,6 +34,11 @@ interface ReconstructionJob {
   source_path?: string
   thumbnail_path?: string
   registered_frames?: number
+  extracted_frames?: number
+  registration_rate?: number
+  trajectory_span?: number
+  trajectory_length?: number
+  trajectory_coverage?: number
   gaussian_count?: number
   camera_height?: number
   initial_view?: {
@@ -247,13 +254,51 @@ export async function POST(request: NextRequest) {
         ? calibratedScale
         : 1
       const groundPlaneOffset = rawGroundPlaneOffset * metricScaleFactor
+      // Navigation worlds need a usable connected floor, not just a visually
+      // plausible splat. Build the map before publishing so a missing collider
+      // or mostly unreachable reconstruction cannot enter the training set.
+      const walkableMap = await buildWalkableMap(
+        AI_BACKEND_URL,
+        worldOutDir,
+        {
+          rotationX: NERFSTUDIO_ROTATION_X,
+          metricScale: metricScaleFactor,
+          spawn: hasInitialPosition
+            ? [initialPosition[0] * metricScaleFactor, initialPosition[2] * metricScaleFactor]
+            : undefined,
+        },
+      )
+      if (job.quality === 'navigation') {
+        const reachability = walkableMap && walkableMap.standable_area > 0
+          ? walkableMap.walkable_area / walkableMap.standable_area
+          : 0
+        if (!walkableMap || walkableMap.walkable_area < MIN_NAV_WALKABLE_AREA || reachability < MIN_NAV_REACHABILITY) {
+          throw new Error(
+            `Navigation world rejected: reachable floor is ${walkableMap?.walkable_area ?? 0} m² `
+            + `(${Math.round(reachability * 100)}% of standable space). `
+            + 'Capture more connected floor area and avoid disconnected or heavily occluded views.',
+          )
+        }
+      }
+      const navigationQuality = {
+        profile: job.quality,
+        registered_frames: job.registered_frames ?? null,
+        extracted_frames: job.extracted_frames ?? null,
+        registration_rate: job.registration_rate ?? null,
+        trajectory_span: job.trajectory_span ?? null,
+        trajectory_length: job.trajectory_length ?? null,
+        trajectory_coverage: job.trajectory_coverage ?? null,
+        walkable_area: walkableMap?.walkable_area ?? null,
+        standable_area: walkableMap?.standable_area ?? null,
+      }
       fs.writeFileSync(path.join(stagedWorldDir, 'project.json'), JSON.stringify({
         slug,
         display_name: displayName,
         created_at: now,
         updated_at: now,
         reconstruction_job_id: jobId,
-        notes: `Generated locally with COLMAP + Nerfstudio Splatfacto (${job.quality})`,
+        notes: `Generated locally with COLMAP + Nerfstudio Splatfacto (${job.quality}); ${job.registered_frames ?? '?'} of ${job.extracted_frames ?? '?'} frames registered`,
+        navigation_quality: navigationQuality,
         ...(owner ? { owner } : {}),
       }, null, 2))
 
@@ -273,6 +318,7 @@ export async function POST(request: NextRequest) {
               rotation_x: NERFSTUDIO_ROTATION_X,
               reconstruction_method: 'nerfstudio-splatfacto',
               camera_height_metres: job.camera_height ?? null,
+              navigation_quality: navigationQuality,
             },
           },
         },
@@ -302,23 +348,6 @@ export async function POST(request: NextRequest) {
         ...(typeof initialYaw === 'number' && Number.isFinite(initialYaw) ? { spawnYaw: initialYaw } : {}),
         ...(typeof initialPitch === 'number' && Number.isFinite(initialPitch) ? { spawnPitch: initialPitch } : {}),
       }, null, 2))
-
-      // After the scale, not before: `metricScaleFactor` is calculated from the
-      // collider's own floor height, so the grid could not have been measured
-      // in metres during the collider pass. The spawn is what makes the
-      // difference here -- a video world covers ground the walker cannot reach,
-      // and flooding from the camera's actual start is the only way to say so.
-      await buildWalkableMap(
-        AI_BACKEND_URL,
-        worldOutDir,
-        {
-          rotationX: NERFSTUDIO_ROTATION_X,
-          metricScale: metricScaleFactor,
-          spawn: hasInitialPosition
-            ? [initialPosition[0] * metricScaleFactor, initialPosition[2] * metricScaleFactor]
-            : undefined,
-        },
-      )
 
       const ambienceDir = path.join(process.cwd(), 'public', 'assets', 'ambience')
       if (fs.existsSync(ambienceDir)) {

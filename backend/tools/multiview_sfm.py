@@ -160,7 +160,12 @@ def _pick_windowed(sharpness: np.ndarray, target: int) -> list[int]:
     return chosen
 
 
-def prepare_frames(images_dir: Path, out_dir: Path, target_frames: int = 60) -> list[Path]:
+def prepare_frames(
+    images_dir: Path,
+    out_dir: Path,
+    target_frames: int = 60,
+    frames_per_window: int = FRAMES_PER_WINDOW,
+) -> list[Path]:
     """Select frames from an existing image sequence, in filename order.
 
     The multi-image entry point: the same selection the video path applies after
@@ -176,9 +181,15 @@ def prepare_frames(images_dir: Path, out_dir: Path, target_frames: int = 60) -> 
         raise RuntimeError(f"no images found in {images_dir}")
 
     sharpness = _measure_sharpness(candidates)
+    # An image directory is already a sampled sequence. Keep its requested
+    # budget intact; `frames_per_window` controls the denser video candidate
+    # stream below.
     chosen = _pick_windowed(sharpness, target_frames)
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("frame_*.*"):
+        stale.unlink()
+    (out_dir / "source_names.json").unlink(missing_ok=True)
     kept: list[Path] = []
     origins: dict[str, str] = {}
     for index in chosen:
@@ -201,7 +212,12 @@ def prepare_frames(images_dir: Path, out_dir: Path, target_frames: int = 60) -> 
     return kept
 
 
-def extract_frames(video: Path, out_dir: Path, target_frames: int = 60) -> list[Path]:
+def extract_frames(
+    video: Path,
+    out_dir: Path,
+    target_frames: int = 60,
+    frames_per_window: int = FRAMES_PER_WINDOW,
+) -> list[Path]:
     """Pull evenly spaced, sharp frames out of a walkthrough video."""
     if not video.exists():
         raise FileNotFoundError(f"video not found: {video}")
@@ -231,9 +247,16 @@ def extract_frames(video: Path, out_dir: Path, target_frames: int = 60) -> list[
         raise RuntimeError(f"no frames decoded from {video.name}")
 
     sharpness = _measure_sharpness(candidates)
-    chosen = _pick_windowed(sharpness, min(target_frames, len(candidates) // FRAMES_PER_WINDOW or 1))
+    frames_per_window = max(1, int(frames_per_window))
+    chosen = _pick_windowed(
+        sharpness,
+        min(target_frames, len(candidates) // frames_per_window or 1),
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("frame_*.*"):
+        stale.unlink()
+    (out_dir / "source_names.json").unlink(missing_ok=True)
     kept: list[Path] = []
     for index in chosen:
         destination = out_dir / f"frame_{len(kept):04d}.jpg"
@@ -252,7 +275,12 @@ def extract_frames(video: Path, out_dir: Path, target_frames: int = 60) -> list[
     return kept
 
 
-def solve_poses(frames_dir: Path, work_dir: Path, use_gpu: bool = False) -> SparseScene:
+def solve_poses(
+    frames_dir: Path,
+    work_dir: Path,
+    use_gpu: bool = False,
+    sequential_overlap: int = SFM_SEQUENTIAL_OVERLAP,
+) -> SparseScene:
     """Run COLMAP structure from motion over the extracted frames.
 
     Sequential matching, not exhaustive: video frames arrive in order, so only
@@ -310,7 +338,7 @@ def solve_poses(frames_dir: Path, work_dir: Path, use_gpu: bool = False) -> Spar
     # Each extra frame of overlap costs a full CPU match. Five neighbours plus
     # quadratic spacing (1, 2, 4, 8, 16 frames back) buys long-range links for
     # the price of short-range ones, which is what keeps a loop closing.
-    pairing_options.overlap = SFM_SEQUENTIAL_OVERLAP
+    pairing_options.overlap = max(1, int(sequential_overlap))
     pairing_options.quadratic_overlap = True
     pycolmap.match_sequential(
         database_path=database_path,
@@ -599,16 +627,39 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True, help="working directory")
     parser.add_argument("--target-frames", type=int, default=60,
                         help="how many frames to hand to COLMAP")
+    parser.add_argument(
+        "--frames-per-window", type=int, default=FRAMES_PER_WINDOW,
+        help="candidate frames represented by each selected frame; 1 keeps every sharp frame",
+    )
+    parser.add_argument(
+        "--sequential-overlap", type=int, default=SFM_SEQUENTIAL_OVERLAP,
+        help="number of neighbouring frames COLMAP matches",
+    )
     parser.add_argument("--gpu", action="store_true",
                         help="try GPU SIFT (ignored: the PyPI pycolmap wheel has no CUDA)")
     args = parser.parse_args()
 
     frames_dir = args.out / "frames"
     if args.source.is_dir():
-        frames = prepare_frames(args.source, frames_dir, target_frames=args.target_frames)
+        frames = prepare_frames(
+            args.source,
+            frames_dir,
+            target_frames=args.target_frames,
+            frames_per_window=args.frames_per_window,
+        )
     else:
-        frames = extract_frames(args.source, frames_dir, target_frames=args.target_frames)
-    scene = solve_poses(frames_dir, args.out / "colmap", use_gpu=args.gpu)
+        frames = extract_frames(
+            args.source,
+            frames_dir,
+            target_frames=args.target_frames,
+            frames_per_window=args.frames_per_window,
+        )
+    scene = solve_poses(
+        frames_dir,
+        args.out / "colmap",
+        use_gpu=args.gpu,
+        sequential_overlap=args.sequential_overlap,
+    )
 
     # Scale calibration needs SHARP depth maps, which live on the GPU side of the
     # pipeline; without them the trajectory is still useful, just not metric.
