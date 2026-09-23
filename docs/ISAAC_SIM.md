@@ -768,6 +768,45 @@ of viewpoints**, so their agreement said nothing about whether that set was
 right. A second opinion only helps when it is independent further upstream than
 the fault.
 
+## What the agent sees at each viewpoint (`vlnviews.py`, `render_viewpoints.py`)
+
+The graph is half a VLN environment; the other half is a panorama at every
+viewpoint. Two steps, because the second needs gsplat and this machine only has
+it in the WSL Splatfacto venv:
+
+```bash
+# CPU: probe every viewpoint against the collider, write R2R-shaped files and a render job
+python scripts/isaac-sim/vlnviews.py marble-office
+
+# GPU, in WSL: six skybox faces + depth per viewpoint
+wsl -d Ubuntu-22.04 -- env CUDA_HOME=/usr/local/cuda-12.8 TORCH_CUDA_ARCH_LIST=12.0 MAX_JOBS=1 \
+    ~/.venvs/image2world-splatfacto/bin/python backend/tools/render_viewpoints.py \
+    public/worlds/marble-office/export/vln/render_job.json
+```
+
+Everything lands in `public/worlds/<slug>/export/vln/`: `<slug>_connectivity.json`
+(the Matterport3D simulator's shape), `<slug>_episodes.json` (R2R's, with empty
+`instructions`), `viewpoints.json` (the probe verdict per viewpoint), and
+`skybox/<id>_skybox<k>_sami.jpg` plus `<id>_depth.npz` and `render_report.json`.
+Headings follow MP3D (0 along map +y, clockwise); faces are 0 up, 1–4 the
+horizon at 0/90/180/270, 5 down. Keep `MAX_JOBS=1`: the first run JIT-compiles
+gsplat (about 14 minutes) and the default parallel build is OOM-killed.
+
+**The frame conversion is checked, and the check can fail.** The map frame is
+the viewer frame turned +90° about X. Each viewpoint must have floor under it
+within the map's own ground band, headroom for a 1.5 m eye, and walls no closer
+than the robot radius. Deliberately breaking the conversion on `marble-office`
+(which, unlike `reference-rooms`, has a non-trivial background transform):
+dropping the metric scale or the ground offset fails 99/99 viewpoints,
+mirroring the map fails 38, a 0.3 m shift fails 6. Splat depth and collider
+depth agree to a 3.1% median relative error.
+
+**Coverage is not quality.** `render_report.json` counts pixels with alpha ≥ 0.5.
+That catches holes, not smear: `multiview-meetingroom` covers 87–95% of every
+horizon face, and those faces are dominated by SHARP's stretch artifacts as soon
+as the camera leaves the input views. The two Marble worlds render clean. Look
+at the faces before training on them.
+
 ## Limitations
 
 * **No despeckle.** `build_walkable.py` closes pinholes and drops specks before

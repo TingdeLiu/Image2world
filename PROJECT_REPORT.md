@@ -2830,6 +2830,62 @@ PLY 渲染，`backend/sam3/` 有分割），但都还没接。而更靠前的瓶
 一台相机的可见楔形而不是一个房间。**把那块楔形补成房间，比这一节里的任何后处理都更能把地
 图推过这道杠。**
 
+## 3.33 📷 视点上看到什么：全景与 R2R 格式导出（2026-09-24）
+
+§3.32 末尾说缺全景，这一节把它接上了，分两段：
+
+- `scripts/isaac-sim/vlnviews.py`（numpy + trimesh，CI 覆盖）：读 `-vlngraph.json`，把每个
+  视点从地图坐标（Z-up，Isaac Sim 看到的）换到 viewer 坐标（Y-up，splat 和碰撞体所在），
+  用碰撞体逐个探测，然后写出 Matterport3D 模拟器格式的 `<slug>_connectivity.json`、
+  `instructions` 为空的 R2R 式 `<slug>_episodes.json`，以及一份渲染任务。
+- `backend/tools/render_viewpoints.py`（WSL 的 Splatfacto venv，gsplat）：在每个视点渲染 6 面
+  天空盒（MP3D 的 `<id>_skybox<k>_sami.jpg` 命名）和深度，并统计每个面有多少像素被 splat
+  覆盖。
+
+输出在 `public/worlds/<slug>/export/vln/`。
+
+**坐标换算要先证明能失败。** 地图 = viewer 绕 X 轴转 +90°，即 `(x, y, z)_map = (x, -z, y)_viewer`，
+背景变换（平移、旋转、缩放）在这层旋转里面。每个视点做三项检查：向下的射线必须落在地图的地面
+高度带里，眼睛位置要有头顶空间，四周净空要不小于建图时给的机器人半径。第一版在 8 个真实世界上
+**全部**报 `not_floor`，原因是我读错了字段：`floor_top_z` 是 floor 部件包围盒的**顶部**
+（marble-office 是 0.371 m，而地面在 0.004 m），真正的行走高度在 `walkable_ground_z`。另外，
+地面附近朝下的面片会被按法线标成 `ceiling`（99 个视点里有 94 个脚下就是这种面）。所以现在
+地面按建图用的高度带判断，标签只记录不裁决。
+
+检查只有能失败才有意义。`reference-rooms` 的背景变换是恒等的，测不到变换本身，所以反向对照
+放在 marble-office 上做（`flip_y`、缩放 2.1、偏移 1.46）：
+
+| 故意改错 | marble-office 通过 | multiview-meetingroom 通过 |
+| --- | ---: | ---: |
+| 正确 | 99/99 | 32/32 |
+| 漏掉缩放 | 0/99 | 32/32（它的缩放本来就是 1） |
+| 漏掉地面偏移 | 0/99 | 0/32 |
+| 镜像地图 y | 61/99 | 0/32 |
+| 平移 0.3 m | 93/99 | 23/32 |
+
+还有一项独立的校验：splat 渲出的深度和碰撞体射线求得的深度，在 marble-office 的 5 个视点上
+中位相对误差是 **3.1%**（p90 约 7%）。
+
+**结果。** 缓存好 gsplat 编译后（首次在 WSL 串行编译约 14 分钟），marble-office 99 个视点 × 6 面
+× 512 px 用 **16.8 s**。
+
+| 世界 | 可用视点 | 水平面覆盖率 p0 / p50 | 画面 |
+| --- | ---: | --- | --- |
+| marble-office | 99/99 | 0.999 / 1.000 | 干净 |
+| marble-from-photo-7y19ti | 21/21 | 0.996 / 1.000 | 干净 |
+| multiview-meetingroom | 32/32 | 0.872 / 0.926 | **大面积拖影** |
+| family-splatfacto-integration-jpjwgt | 3/17 | 0.906 / 0.911 | 14 个视点头顶空间不足 |
+
+**覆盖率会高估画质。** multiview-meetingroom 的覆盖率超过 87%，但一离开输入相机，画面就被
+SHARP 的拉伸拖影占满（与"拉伸伪影无法靠过滤高斯修掉"那条结论是同一个现象）。像素确实被
+覆盖了，覆盖它们的是拖影。所以 `render_report.json` 里的覆盖率只能抓**空洞**，抓不到
+**拖影**；判断能不能用来训练，仍然需要人眼看，或者需要一个衡量新视角质量的指标，这个目前
+还没有。Marble 的两个世界是完整封闭的场景，画面没有这个问题。
+
+**还缺什么。** 指令（`instructions` 为空）。物体级语义：目前只有碰撞体的五类几何部件，
+`--labels` 能按面光栅化；`backend/sam3/` 仍未接入。瓶颈仍是 §3.32 说的采集：能渲出干净画面、
+又通过全部五项 VLN 标准的世界，目前一个也没有。
+
 ## 4. 📅 未来商业化改造技术指南 (SaaS Commercialization Roadmap)
 
 若您想在后续将此项目打包部署为 SaaS 云服务，建议遵循以下技术升级路径：
