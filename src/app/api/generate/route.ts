@@ -525,9 +525,15 @@ export async function POST(request: NextRequest) {
 
   const fileValue = formData.get('file')
   const file = fileValue instanceof File ? fileValue : null
-  const name = (formData.get('name') as string | null)?.trim() || ''
+  const nameValue = formData.get('name')
+  const keyValue = formData.get('marbleApiKey')
+  if ((nameValue !== null && typeof nameValue !== 'string')
+    || (keyValue !== null && typeof keyValue !== 'string')) {
+    return generationErrorResponse('World name and Marble API key must be text fields.', 400)
+  }
+  const name = nameValue?.trim() || ''
   // Supplied per-request from the user's browser; never stored server-side.
-  const marbleApiKey = (formData.get('marbleApiKey') as string | null)?.trim() || undefined
+  const marbleApiKey = keyValue?.trim() || undefined
 
   if (!file || !name) {
     return generationErrorResponse('Missing image file or world name.', 400)

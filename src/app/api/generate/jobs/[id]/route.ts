@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { guardRoute } from '../../../../../utils/routeGuard'
-import { cancelJob, readJob } from '../../../../../utils/generationJobs'
+import { cancelJob, isGenerationJobId, readJob } from '../../../../../utils/generationJobs'
 
 export const dynamic = 'force-dynamic'
 
@@ -12,6 +12,9 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
   const { denied } = await guardRoute(request)
   if (denied) return denied
   const { id } = await params
+  if (!isGenerationJobId(id)) {
+    return NextResponse.json({ error: 'Generation job not found.' }, { status: 404 })
+  }
   const job = readJob(id)
   if (!job) return NextResponse.json({ error: 'Generation job not found.' }, { status: 404 })
   return NextResponse.json({ job })
@@ -26,6 +29,9 @@ export async function DELETE(request: NextRequest, { params }: RouteContext) {
   const { denied } = await guardRoute(request)
   if (denied) return denied
   const { id } = await params
+  if (!isGenerationJobId(id)) {
+    return NextResponse.json({ error: 'Generation job not found.' }, { status: 404 })
+  }
   const job = cancelJob(id)
   if (!job) return NextResponse.json({ error: 'Generation job not found.' }, { status: 404 })
   return NextResponse.json({ job })

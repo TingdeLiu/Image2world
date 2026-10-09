@@ -32,9 +32,30 @@ jobs:
 
       - run: npm run test
 
-      # Last, because it is the slowest and the three checks above localise a
-      # failure far better than a bundler error does.
+      # Build after the fast checks, then exercise the bundled route handlers.
       - run: npm run build
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install browser test dependencies
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Check the running production server
+        run: |
+          node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000 > /tmp/image2world-web.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000 > /dev/null; then break; fi
+            sleep 1
+          done
+          python scripts/verify_landing.py
+          python scripts/verify_api.py
+          python scripts/verify_assets.py
 
   backend:
     name: Backend (CPU tests)
