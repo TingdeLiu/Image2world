@@ -4,8 +4,9 @@ Run against `npm start` to catch Next.js's startup public-file index:
     python scripts/verify_assets.py [--url http://127.0.0.1:3000]
 """
 import argparse
+import secrets
+import shutil
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from playwright.sync_api import sync_playwright
 
@@ -13,10 +14,15 @@ from playwright.sync_api import sync_playwright
 def verify_assets(base_url: str) -> None:
     root = Path(__file__).resolve().parents[1] / "public" / "worlds"
     payload = b"runtime world asset: 0123456789"
-    # The only files removed are in this newly allocated directory under worlds/.
-    with TemporaryDirectory(prefix="validation-assets-", dir=root) as temporary:
-        directory = Path(temporary).resolve()
-        assert directory.parent == root.resolve()
+    # A world slug is [a-z0-9-] (worldsScanner.SLUG_PATTERN). TemporaryDirectory
+    # names draw from a-z0-9_ as well, so about one run in five got an
+    # underscore, the server rightly refused the slug, and this check reported
+    # a 404 as a serving bug. Hex is always a valid slug.
+    directory = (root / f"validation-assets-{secrets.token_hex(6)}").resolve()
+    assert directory.parent == root.resolve()
+    directory.mkdir()       # never an existing world: fails rather than reuses
+    # The only files removed are in this newly made directory under worlds/.
+    try:
         output = directory / "output" / "world"
         output.mkdir(parents=True)
         (output / "probe.spz").write_bytes(payload)
@@ -49,6 +55,8 @@ def verify_assets(base_url: str) -> None:
                 assert request.get(url.replace("probe.spz", "..%5C..%5C..%5Cpackage.json")).status == 404
             finally:
                 request.dispose()
+    finally:
+        shutil.rmtree(directory)
     print("Runtime asset checks passed: file contents, HEAD, ranges, caching, JSON, missing files, traversal")
 
 

@@ -85,15 +85,31 @@ def read_ply(path: Path) -> dict[str, np.ndarray]:
 
 
 def quaternion_of(rotation: np.ndarray) -> np.ndarray:
-    """wxyz quaternion of a proper rotation matrix."""
-    w = math.sqrt(max(0.0, 1.0 + rotation[0, 0] + rotation[1, 1] + rotation[2, 2])) / 2.0
-    x = math.copysign(math.sqrt(max(0.0, 1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2])) / 2.0,
-                      rotation[2, 1] - rotation[1, 2])
-    y = math.copysign(math.sqrt(max(0.0, 1.0 - rotation[0, 0] + rotation[1, 1] - rotation[2, 2])) / 2.0,
-                      rotation[0, 2] - rotation[2, 0])
-    z = math.copysign(math.sqrt(max(0.0, 1.0 - rotation[0, 0] - rotation[1, 1] + rotation[2, 2])) / 2.0,
-                      rotation[1, 0] - rotation[0, 1])
-    return np.array([w, x, y, z])
+    """wxyz quaternion of a proper rotation matrix, with w >= 0.
+
+    Shepperd's method: take the square root only for the largest component and
+    get the other three from the off-diagonal entries. Square-rooting every
+    component turns a one-ulp error on the diagonal into 2**-27 where the
+    answer is zero -- a half turn came out with w = 7.45e-9 on some CI runners
+    and 0 on others, depending on how numpy rounded `linear / scale`.
+    """
+    r = rotation
+    trace = r[0, 0] + r[1, 1] + r[2, 2]
+    largest = int(np.argmax([trace, r[0, 0], r[1, 1], r[2, 2]]))
+    if largest == 0:
+        s = 2.0 * math.sqrt(max(0.0, 1.0 + trace))
+        q = [s / 4.0, (r[2, 1] - r[1, 2]) / s, (r[0, 2] - r[2, 0]) / s, (r[1, 0] - r[0, 1]) / s]
+    elif largest == 1:
+        s = 2.0 * math.sqrt(max(0.0, 1.0 + r[0, 0] - r[1, 1] - r[2, 2]))
+        q = [(r[2, 1] - r[1, 2]) / s, s / 4.0, (r[0, 1] + r[1, 0]) / s, (r[0, 2] + r[2, 0]) / s]
+    elif largest == 2:
+        s = 2.0 * math.sqrt(max(0.0, 1.0 - r[0, 0] + r[1, 1] - r[2, 2]))
+        q = [(r[0, 2] - r[2, 0]) / s, (r[0, 1] + r[1, 0]) / s, s / 4.0, (r[1, 2] + r[2, 1]) / s]
+    else:
+        s = 2.0 * math.sqrt(max(0.0, 1.0 - r[0, 0] - r[1, 1] + r[2, 2]))
+        q = [(r[1, 0] - r[0, 1]) / s, (r[0, 2] + r[2, 0]) / s, (r[1, 2] + r[2, 1]) / s, s / 4.0]
+    q = np.array(q)
+    return -q if q[0] < 0 else q
 
 
 def quaternion_multiply(a, b):
