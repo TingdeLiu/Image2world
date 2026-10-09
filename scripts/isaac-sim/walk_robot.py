@@ -68,7 +68,12 @@ parser.add_argument("--settle", type=int, default=1,
                     help="frames before the robot is driven; 1 is the tested value")
 parser.add_argument("--show-collider", action="store_true",
                     help="look at the collision mesh instead of the splat")
+parser.add_argument("--start", metavar="X,Y", default="0,0",
+                    help="where to drop the robot, world metres; the viewer's own "
+                         "spawn is the origin, which is not always open floor. "
+                         "Write a negative one as --start=-3,2")
 args = parser.parse_args()
+start_xy = tuple(float(v) for v in args.start.split(","))
 
 from isaacsim import SimulationApp
 
@@ -94,6 +99,9 @@ from isaacsim.robot.policy.examples.robots import (
 )
 from isaacsim.storage.native import get_assets_root_path
 from pxr import Usd, UsdGeom
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import usdfloor  # noqa: E402
 
 torch = import_module("torch")
 
@@ -183,14 +191,14 @@ else:
     cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
                               [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
     rng = cache.ComputeWorldBound(collider).ComputeAlignedRange()
-    floor_prim = stage.GetPrimAtPath("/World/Ground/Background/Collider/floor")
-    if floor_prim and floor_prim.IsValid():
-        # The bbox *minimum*, not the maximum: the floor mesh spans a range
-        # (0.004 to 0.371 on marble-office) and the low end is the ground the
-        # robot stands on. Pure USD, no physics, so this can run before the
-        # timeline ever plays -- which is what lets the robot be built while
-        # stopped, the way the example does it.
-        floor_z = float(cache.ComputeWorldBound(floor_prim).ComputeAlignedRange().GetMin()[2])
+    # The floor under the spawn, not the floor part's bbox minimum -- see
+    # usdfloor.py for the world where the two are 0.2 m apart and the robot
+    # landed on its belly. Pure USD, no physics, so this still runs before the
+    # timeline ever plays, which is what lets the robot be built while stopped.
+    floor_z, floor_note = usdfloor.spawn_floor(
+        stage, "/World/Ground/Background/Collider/floor", *start_xy, cache)
+    if floor_note:
+        print(f"  !! {floor_note}")
     print(f"room {rng.GetMax()[0] - rng.GetMin()[0]:.2f} x "
           f"{rng.GetMax()[1] - rng.GetMin()[1]:.2f} m, floor z={floor_z:.3f}")
 
@@ -203,7 +211,7 @@ else:
         if ceiling and ceiling.IsValid():
             UsdGeom.Imageable(ceiling).MakeInvisible()
 
-spawn = [0.0, 0.0, floor_z + SPAWN_HEIGHT]
+spawn = [start_xy[0], start_xy[1], floor_z + SPAWN_HEIGHT]
 print(f"spawn {tuple(round(v, 3) for v in spawn)}  ({args.robot})")
 report["spawn"] = [round(v, 3) for v in spawn]
 

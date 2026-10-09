@@ -88,8 +88,24 @@ python scripts/isaac-sim/pipeline.py --all --json report.json
 ```
 
 ```
-    export  ->  map  ->  check  ->  nav2  ->  drive
+    export  ->  map  ->  check  ->  vln  ->  nav2  ->  drive
 ```
+
+The `vln` stage asks whether the map is good enough to *train* a vision-and-language
+navigation agent on, which is a far higher bar than the rest of the chain aims at and
+one no *captured* world here clears. It lays a viewpoint graph over the map, judges it against
+five criteria, and draws it. No two worlds fail on the same one: `marble-office`
+has the scale (99 viewpoints, 100 episodes) and fails on detour alone at 1.12;
+`marble-from-photo-7y19ti` fails on episode yield alone. See
+[docs/ISAAC_SIM.md](../../docs/ISAAC_SIM.md) for the criteria and the three ways the
+gate was wrong before it was right — one of which was depressing every number on
+the page.
+
+That none of them clears it is about the captures, not the criteria:
+`make_reference_world.py` builds a synthetic five-room world, and the same
+unmodified chain takes it to 5/5 — 212 viewpoints in one component, detour p90
+2.36, episodes at a median of 12.5 m over 8 hops. Without it, a gate that had
+only ever refused would look the same as one nothing could satisfy.
 
 Everything below this section existed before it did, and all of it was
 documented — as a list of commands for a person to type in order. **Nothing ran

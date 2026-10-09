@@ -143,6 +143,99 @@ def prepare_nerfstudio_dataset(scene_path: Path, dataset_dir: Path) -> tuple[int
     return len(frames), has_seed_cloud
 
 
+def capture_metrics(scene_path: Path, total_frames: int | None = None) -> dict[str, int | float]:
+    """Summarise whether the registered camera track is useful for navigation.
+
+    A successful COLMAP exit is not enough: it can register a short part of a
+    walkthrough and still produce a plausible looking splat. These metrics are
+    persisted with the job so the UI and published world can explain what was
+    actually reconstructed.
+    """
+    payload = json.loads(scene_path.read_text(encoding="utf-8"))
+    frames = payload.get("frames", [])
+    centres: list[np.ndarray] = []
+    for frame in frames:
+        centre = frame.get("camera_centre")
+        if centre is None:
+            matrix = np.asarray(frame.get("world_to_camera"), dtype=np.float64)
+            if matrix.shape != (4, 4):
+                continue
+            centre = -matrix[:3, :3].T @ matrix[:3, 3]
+        value = np.asarray(centre, dtype=np.float64)
+        if value.shape == (3,) and np.isfinite(value).all():
+            centres.append(value)
+
+    registered = len(frames)
+    extracted = max(registered, int(total_frames if total_frames is not None else registered))
+    registration_rate = registered / extracted if extracted else 0.0
+    scene_extent = 0.0
+    cloud_path = scene_path.with_suffix(".npz")
+    if cloud_path.exists():
+        with np.load(cloud_path) as cloud:
+            points = np.asarray(
+                cloud["points_xyz"] if "points_xyz" in cloud.files else np.empty((0, 3)),
+                dtype=np.float64,
+            )
+        finite_points = points[np.isfinite(points).all(axis=1)] if points.ndim == 2 else np.empty((0, 3))
+        if len(finite_points) >= 2:
+            # COLMAP's scale is arbitrary. A robust scene extent makes the
+            # coverage ratio invariant to that scale and ignores outlier points.
+            scene_extent = float(np.linalg.norm(
+                np.percentile(finite_points, 95, axis=0)
+                - np.percentile(finite_points, 5, axis=0)
+            ))
+
+    if centres:
+        track = np.asarray(centres)
+        trajectory_span = float(np.linalg.norm(track.max(axis=0) - track.min(axis=0)))
+        trajectory_length = float(np.linalg.norm(np.diff(track, axis=0), axis=1).sum()) if len(track) > 1 else 0.0
+    else:
+        trajectory_span = 0.0
+        trajectory_length = 0.0
+    trajectory_coverage = trajectory_span / scene_extent if scene_extent > 1e-9 else 0.0
+
+    return {
+        "registered_frames": registered,
+        "extracted_frames": extracted,
+        "registration_rate": registration_rate,
+        "trajectory_span": trajectory_span,
+        "trajectory_length": trajectory_length,
+        "scene_extent": scene_extent,
+        "trajectory_coverage": trajectory_coverage,
+    }
+
+
+def validate_capture(
+    metrics: dict[str, int | float],
+    *,
+    min_registration_rate: float = 0.0,
+    min_registered_frames: int = 0,
+    min_trajectory_coverage: float = 0.0,
+) -> None:
+    """Reject a partial or stationary capture before expensive GPU training."""
+    failures: list[str] = []
+    registered = int(metrics.get("registered_frames", 0))
+    rate = float(metrics.get("registration_rate", 0.0))
+    coverage = float(metrics.get("trajectory_coverage", 0.0))
+    if min_registered_frames and registered < min_registered_frames:
+        failures.append(f"only {registered} registered frames (need at least {min_registered_frames})")
+    if min_registration_rate and rate < min_registration_rate:
+        failures.append(
+            f"registration is {rate:.0%} (need at least {min_registration_rate:.0%})"
+        )
+    if min_trajectory_coverage and coverage < min_trajectory_coverage:
+        failures.append(
+            f"camera coverage is {coverage:.0%} of the reconstructed scene (need at least {min_trajectory_coverage:.0%})"
+        )
+    if failures:
+        raise RuntimeError(
+            "Navigation capture rejected: "
+            + "; ".join(failures)
+            + ". Walk slowly through connected spaces, keep the camera moving, "
+            "and include a return pass with textured surfaces in view."
+        )
+
+
 def newest_config(training_dir: Path) -> Path:
     configs = list(training_dir.rglob("config.yml"))
     if not configs:
@@ -209,6 +302,36 @@ def main() -> int:
     parser.add_argument("source", type=Path, help="walkthrough video or ordered image directory")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="disposable experiment directory")
     parser.add_argument("--target-frames", type=int, default=60, help="maximum frames handed to SfM")
+    parser.add_argument(
+        "--frames-per-window",
+        type=int,
+        default=2,
+        help="candidate frames represented by each selected frame; 1 keeps every sharp frame",
+    )
+    parser.add_argument(
+        "--sequential-overlap",
+        type=int,
+        default=5,
+        help="number of neighbouring frames COLMAP matches",
+    )
+    parser.add_argument(
+        "--min-registration-rate",
+        type=float,
+        default=0.0,
+        help="reject captures with a lower registered/extracted frame ratio",
+    )
+    parser.add_argument(
+        "--min-registered-frames",
+        type=int,
+        default=0,
+        help="reject captures with fewer registered frames",
+    )
+    parser.add_argument(
+        "--min-trajectory-coverage",
+        type=float,
+        default=0.0,
+        help="reject captures whose camera path covers too little of the reconstructed scene",
+    )
     parser.add_argument("--iterations", type=int, default=5_000, help="Splatfacto optimisation steps")
     parser.add_argument(
         "--camera-scale",
@@ -257,6 +380,11 @@ def main() -> int:
         "target_frames": args.target_frames,
         "iterations": args.iterations,
         "camera_scale": args.camera_scale,
+        "frames_per_window": args.frames_per_window,
+        "sequential_overlap": args.sequential_overlap,
+        "min_registration_rate": args.min_registration_rate,
+        "min_registered_frames": args.min_registered_frames,
+        "min_trajectory_coverage": args.min_trajectory_coverage,
         "timings_seconds": {},
     }
     write_state(state_path, state)
@@ -275,10 +403,26 @@ def main() -> int:
                     str(sfm_dir),
                     "--target-frames",
                     str(args.target_frames),
+                    "--frames-per-window",
+                    str(args.frames_per_window),
+                    "--sequential-overlap",
+                    str(args.sequential_overlap),
                 ]
             )
         else:
             print(f"[prototype] reusing {scene_path}")
+
+        frames_dir = sfm_dir / "frames"
+        extracted_frames = len(list(frames_dir.glob("frame_*.*")))
+        metrics = capture_metrics(scene_path, extracted_frames)
+        state.update(metrics)
+        write_state(state_path, state)
+        validate_capture(
+            metrics,
+            min_registration_rate=args.min_registration_rate,
+            min_registered_frames=args.min_registered_frames,
+            min_trajectory_coverage=args.min_trajectory_coverage,
+        )
 
         # Refresh referenced files in place. Nerfstudio may briefly keep image
         # directory handles open after a failed WSL run, so deleting the whole

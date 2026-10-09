@@ -19,7 +19,7 @@ import { APP_REQUEST_HEADERS } from '../utils/sameOrigin'
 
 type BackendStatus = 'checking' | 'ready' | 'offline'
 type GenerationStage = 'initializing' | 'uploading' | 'sfm' | 'training' | 'exporting' | 'splat' | 'finalizing'
-type VideoQuality = 'preview' | 'standard' | 'quality'
+type VideoQuality = 'preview' | 'standard' | 'quality' | 'navigation'
 
 interface GenerationUiProgress {
   stage: GenerationStage
@@ -894,6 +894,11 @@ export function CreateWorldModal({ open, onClose }: Props) {
                 )}
               </div>
               {fileError && <span className="text-[10px] font-mono text-red-300/80" role="alert">{fileError}</span>}
+              {selectedFile && !selectedVideo && (
+                <span className="font-mono text-[10px] leading-relaxed text-amber-200/60">
+                  For navigation training, use a walkthrough video with connected camera motion. A single image can make a visual preview, but cannot expose unseen space reliably.
+                </span>
+              )}
             </div>
 
             {selectedVideo && (
@@ -902,11 +907,12 @@ export function CreateWorldModal({ open, onClose }: Props) {
                   <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-white/50">
                     Reconstruction quality
                   </span>
-                  <div className="grid grid-cols-3 gap-1 rounded-md bg-black/25 p-1">
+                  <div className="grid grid-cols-4 gap-1 rounded-md bg-black/25 p-1">
                     {([
                       ['preview', 'Preview'],
                       ['standard', 'Standard'],
                       ['quality', 'Quality'],
+                      ['navigation', 'Navigation'],
                     ] as const).map(([value, label]) => (
                       <button
                         key={value}
@@ -927,8 +933,15 @@ export function CreateWorldModal({ open, onClose }: Props) {
                       ? '140 frames · 7k steps'
                       : videoQuality === 'standard'
                         ? '280 frames · 20k steps'
-                        : '400 frames · 30k steps'}
+                        : videoQuality === 'quality'
+                          ? '400 frames · 30k steps · denser coverage'
+                          : '480 frames · 45k steps · tracking + coverage checks'}
                   </span>
+                  {videoQuality === 'navigation' && (
+                    <span className="font-mono text-[9px] leading-relaxed text-cyan-200/55">
+                      Recommended for navigation training. Walk slowly through connected spaces and return near the start; incomplete tracks are rejected before training.
+                    </span>
+                  )}
                 </div>
                 <label className="flex flex-col gap-1.5 font-mono text-[10px] uppercase tracking-wider text-white/50">
                   Camera height

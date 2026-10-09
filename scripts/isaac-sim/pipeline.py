@@ -1,6 +1,6 @@
 """Run the whole generated-world -> navigable-map pipeline, and say what broke.
 
-    export  ->  map  ->  check  ->  nav2  ->  drive
+    export  ->  map  ->  check  ->  vln  ->  nav2  ->  drive
 
 Every stage of this already existed and every stage was documented, as a list of
 commands for a person to type in order. Nothing ran the list. Two things follow
@@ -41,7 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 WORLDS = os.path.join(ROOT, "public", "worlds")
 
-STAGES = ("export", "map", "check", "nav2", "drive")
+STAGES = ("export", "map", "check", "vln", "nav2", "drive")
 
 # The patterns that turn each stage's stdout into the report, named rather than
 # written inline so `test_pipeline.py` can exercise *these* and not a copy of
@@ -63,6 +63,9 @@ SAYS = {
     # `build_navmap.py` marks a deliberate refusal so it does not arrive here as
     # a bare `exit 1` with the reason buried in Kit's log.
     "refused": r"REFUSED: (?P<why>[^\n]+)",
+    "vln": (r"VLN-READY: (?P<ready>yes|no) \((?P<met>\d+)/(?P<total>\d+) "
+            r"criteria met"),
+    "viewpoints": (r"graph\s+(?P<viewpoints>\d+) viewpoints, (?P<links>\d+) edges"),
 }
 
 
@@ -219,6 +222,10 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
     was = os.path.getmtime(yaml) if os.path.isfile(yaml) else None
     stage = add("map", [isaac or "python", os.path.join(HERE, "build_navmap.py"),
                         usdz, "--out", export_dir], env=foreign_python_env())
+    # Whether this run wrote the map now on disk, which is a different question
+    # from whether that map is any good. Both end the stage red, and only the
+    # first is a reason to stop reading the file.
+    rewrote = False
     if stage:
         stage.pick(SAYS["probe"], "box", "box_only")
         stage.pick(SAYS["cells"], "free", "free_m2", "occupied")
@@ -230,6 +237,7 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
         elif stage.status == "ok" and was is not None and os.path.getmtime(yaml) == was:
             stage.status = "exited 0 without rewriting the map -- see its output"
         elif stage.status == "ok":
+            rewrote = True
             stage.status = map_is_usable(os.path.join(export_dir, slug + "-navmap.json"),
                                          stage.notes)
         if stage.status != "ok":
@@ -239,15 +247,34 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
             # green against a map built an hour earlier under different code.
             # `--skip map` is deliberately not affected -- re-checking an
             # existing map is what that flag is for.
-            skip = skip | {"check", "nav2", "drive"}
-            print(f"  .. the map did not build, so check/nav2/drive are not run "
-                  f"against the {slug} map that was already on disk")
+            skip = skip | skip_after_a_bad_map(rewrote)
+            if rewrote:
+                print(f"  .. the {slug} map is this run's but not one to drive, so "
+                      f"check/nav2/drive are skipped and vln still reports on it")
+            else:
+                print(f"  .. the map did not build, so check/vln/nav2/drive are not "
+                      f"run against the {slug} map that was already on disk")
 
     stage = add("check", [sys.executable, os.path.join(HERE, "check_navmap.py"), yaml])
     if stage:
         stage.pick(SAYS["route"], "cells", "metres")
         if stage.status == "ok" and "counts match" not in stage.output:
             stage.status = "counts did not match the build"
+
+    # Whether the map is good enough to *train* on, which is a different and
+    # much higher bar than whether a planner can cross it -- and one every world
+    # in this tree currently misses. Deliberately not fatal to the stages below:
+    # a map that is too small for a dataset is still a map nav2 can drive, and
+    # conflating the two would stop reporting the driving result that has been
+    # green all along.
+    stage = add("vln", [sys.executable, os.path.join(HERE, "vln_check.py"), yaml])
+    if stage:
+        stage.pick(SAYS["viewpoints"], "viewpoints", "links")
+        stage.pick(SAYS["vln"], "ready", "met", "total")
+        if stage.status == "ok" and stage.notes.get("ready") != "yes":
+            missed = re.findall(r"^  (\w+) -- ", stage.output, re.M)
+            stage.status = ("not VLN-ready: "
+                            + (", ".join(missed) if missed else "see its output"))
 
     # nav2's goal comes from the map, not from memory. A hardcoded one is what
     # went stale: the recorded goal (3.79, 9.02) became an unknown cell two map
@@ -286,6 +313,24 @@ def one_world(slug, isaac, skip, timeout, robot, lod):
                             "-- the map is too small for the goal to mean anything")
 
     return stages
+
+
+def skip_after_a_bad_map(rewrote):
+    """Which stages must not run once the `map` stage has gone red.
+
+    Two different reds. If the build did not write a map, everything downstream
+    would read whatever a previous run left on disk -- measured:
+    `singleview-meetingroom` reported `map:XX check:ok`, the check green against
+    a map built an hour earlier under different code.
+
+    If it did write one and the map is merely poor, that file is this run's, and
+    `vln` is the stage whose entire job is to say how a map falls short.
+    `multiview-meetingroom` writes 17.6 m2 of real floor that does not happen to
+    cover where the viewer spawns; "unusable map" alone does not tell you that
+    it is in 6 pieces with 10 viewpoints between them.
+    """
+    always = {"check", "nav2", "drive"}
+    return always if rewrote else always | {"vln"}
 
 
 def map_is_usable(report_path, notes):

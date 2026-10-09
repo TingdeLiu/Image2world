@@ -89,6 +89,11 @@ parser.add_argument("--recoveries", type=int, default=6,
 parser.add_argument("--recovery-radius", type=float, default=0.45,
                     help="how much of the way ahead to write off after a stall, metres")
 parser.add_argument("--headless", action="store_true")
+parser.add_argument("--record", metavar="DIR",
+                    help="also film the run -- first-person, chase and plan-view frames "
+                         "for compose_video.py. Renders at native resolution (DLAA)")
+parser.add_argument("--record-every", type=int, default=2,
+                    help="keep every Nth rendered frame; 2 is 25 fps for a 50 Hz policy")
 parser.add_argument("--out", help="directory for the report and the overlay")
 parser.add_argument("--show-collider", action="store_true",
                     help="look at the collision mesh instead of the splat")
@@ -126,6 +131,7 @@ args = parser.parse_args()
 import numpy as np  # noqa: E402  -- before SimulationApp, which is fine and much faster
 
 import navmap  # noqa: E402
+import usdfloor  # noqa: E402
 
 # --- plan first, and refuse early ----------------------------------------
 # Starting Isaac Sim takes half a minute. If the goal is unreachable, or off the
@@ -163,14 +169,25 @@ print(f"passable for r={args.robot_radius} m "
       f"({'holes count as obstacles' if avoid_unknown else 'holes allowed, nav2 style'}): "
       f"{int(passable.sum())} cells ({int(passable.sum()) * carte.resolution ** 2:.1f} m2)")
 
+# Where the robot is dropped has to fit the whole body, not the planning disc.
+# `--robot-radius` is about half Spot's *width*; its body is 1.1 m long, so a
+# start 0.35 m from the edge of the map can put the rear feet over nothing. That
+# is not hypothetical: `dinghao-2f`'s origin sits on the edge of a hole the
+# scanner left where its operator stood, the nearest passable cell was 0.29 m
+# from it, and Spot fell in backwards 1.2 s after landing. Half-lengths are the
+# manufacturers' published body dimensions. Unknown cells always count here --
+# whatever --allow-unknown says about routes, there is no floor to land on.
+BODY_HALF_LENGTH = {"spot": 0.55, "anymal": 0.47, "go2": 0.35, "h1": 0.25}
+spawn_room = max(args.robot_radius, BODY_HALF_LENGTH[args.robot])
+standable = carte.passable(spawn_room, avoid_unknown=True) & passable
 start_xy = tuple(float(v) for v in args.start.split(","))
 start_cell = carte.cell_of(*start_xy)
-if not (carte.inside(start_cell) and passable[start_cell]):
-    moved = navmap.nearest_passable(passable, start_cell)
+if not (carte.inside(start_cell) and standable[start_cell]):
+    moved = navmap.nearest_passable(standable, start_cell)
     if moved is None:
-        raise SystemExit("no passable cell anywhere on this map")
-    print(f"start {start_xy} is not passable; nearest passable is "
-          f"{tuple(round(v, 2) for v in carte.world_of(*moved))}")
+        raise SystemExit(f"nowhere on this map has {spawn_room} m of room to drop the robot")
+    print(f"start {start_xy} does not leave {spawn_room} m of room for the body; "
+          f"nearest that does is {tuple(round(v, 2) for v in carte.world_of(*moved))}")
     start_cell = moved
 
 if args.goal:
@@ -220,7 +237,12 @@ print(f"  {tuple(round(v, 2) for v in waypoints[0])} -> "
 
 from isaacsim import SimulationApp  # noqa: E402
 
-simulation_app = SimulationApp({"headless": args.headless})
+# DLAA when filming: anti-aliasing at native resolution. The default is DLSS in
+# its Performance mode, which renders at about half the resolution and upscales
+# -- fine for watching a robot, and exactly what blurs the detail a Gaussian
+# splat is there to show.
+simulation_app = SimulationApp({"headless": args.headless,
+                                **({"anti_aliasing": 4} if args.record else {})})
 
 import omni.timeline  # noqa: E402
 import omni.usd  # noqa: E402
@@ -300,12 +322,16 @@ if not (collider and collider.IsValid()):
     raise SystemExit("no collision mesh in this export -- nothing to walk on")
 cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
                           [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
-floor_prim = stage.GetPrimAtPath("/World/Ground/Background/Collider/floor")
-# The bbox *minimum*: the floor mesh spans a range and the low end is the ground
-# the robot stands on. `build_navmap.py` uses the maximum, for a different
-# question -- see its `floor_top`.
-floor_z = (float(cache.ComputeWorldBound(floor_prim).ComputeAlignedRange().GetMin()[2])
-           if floor_prim and floor_prim.IsValid() else 0.0)
+# The floor under the SPAWN, not the floor part's bbox minimum -- see
+# usdfloor.py for the run where the difference put Spot on its belly. It also
+# matters below: lying at 0.09 m read as 0.28 m above that minimum and passed
+# the 0.25 m fall test, so the run reported six recoveries from an obstacle that
+# was not there.
+spawn_xy = carte.world_of(*start_cell)
+floor_z, floor_note = usdfloor.spawn_floor(
+    stage, "/World/Ground/Background/Collider/floor", *spawn_xy, cache)
+if floor_note:
+    print(f"  !! {floor_note}")
 splat = stage.GetPrimAtPath("/World/Ground/Background/Splat")
 if splat and splat.IsValid() and not args.show_collider:
     UsdGeom.Imageable(collider).MakeInvisible()
@@ -314,7 +340,6 @@ else:
     if ceiling and ceiling.IsValid():
         UsdGeom.Imageable(ceiling).MakeInvisible()
 
-spawn_xy = carte.world_of(*start_cell)
 spawn = [spawn_xy[0], spawn_xy[1], floor_z + SPAWN_HEIGHT]
 print(f"floor z={floor_z:.3f}, spawn {tuple(round(v, 3) for v in spawn)} ({args.robot})")
 
@@ -339,6 +364,21 @@ for index, spec in enumerate(args.obstacle):
     UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     print(f"dropped a {side:.2f} x {side:.2f} x {tall:.2f} m box at ({ox}, {oy}) "
           f"that the map does not have")
+
+recorder = None
+if args.record:
+    from recorder import Recorder
+
+    recorder = Recorder(stage, os.path.abspath(args.record), every=args.record_every)
+    # The plan view frames the route with a margin, at the aspect of the panel
+    # compose_video.py puts it in, cut just under a 2.8 m ceiling.
+    xs, ys = [w[0] for w in waypoints], [w[1] for w in waypoints]
+    cx, cy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    half_w, half_h = (max(xs) - min(xs)) / 2.0 + 3.0, (max(ys) - min(ys)) / 2.0 + 3.0
+    aspect = 640.0 / 540.0
+    half_w, half_h = max(half_w, half_h * aspect), max(half_h, half_w / aspect)
+    recorder.render_topdown(simulation_app, (cx - half_w, cx + half_w, cy - half_h, cy + half_h),
+                            cut_z=floor_z + 2.3)
 
 robot = POLICY_CLASS(prim_path=f"/World/{args.robot}", position=spawn)
 policy_dt = getattr(robot, "_dt", None)
@@ -497,6 +537,10 @@ for frame in range(frames):
     if previous is not None:
         driven_m += math.hypot(here[0] - previous[0], here[1] - previous[1])
     previous = here
+    if recorder:
+        recorder.step(here, sim_seconds, {
+            "driven": round(driven_m, 3),
+            "to_goal": round(math.hypot(goal_xy[0] - here[0], goal_xy[1] - here[1]), 3)})
 
     if frame < settle_frames:
         base_command = torch.zeros(3)
@@ -665,6 +709,22 @@ out_json = os.path.join(out_dir, f"{name}-{args.robot}-navigate.json")
 with open(out_json, "w", encoding="utf-8") as fh:
     json.dump(report, fh, indent=2)
 print(f"wrote {out_json}")
+if recorder:
+    # Two more seconds of the robot standing where it ended, for the film only.
+    # After the report on purpose: run inside the measured loop, they were
+    # counted as run time and moved `seconds` and `standing_height_m`.
+    tail_seconds = sim_seconds
+    for _ in range(int(round(2.0 / render_dt))):
+        simulation_app.update()
+        tail_seconds += render_dt
+        here = pose()
+        recorder.step(here, tail_seconds, {
+            "driven": round(driven_m, 3),
+            "to_goal": round(math.hypot(goal_xy[0] - here[0], goal_xy[1] - here[1]), 3)})
+    recorder.close({key: report[key] for key in
+                    ("usd", "robot", "start", "goal", "arrived", "fell", "recoveries",
+                     "planned_m", "driven_m", "seconds", "cross_track_m", "waypoints")}
+                   | {"render_dt": render_dt})
 
 # --- the picture ---------------------------------------------------------
 # The numbers say how far it strayed; the overlay says *where*, which is what

@@ -91,6 +91,21 @@ __pycache__/
 # against a real map, with no GPU, no Isaac Sim and no API key.
 /public/worlds/demo-office/export/*.usdz
 /public/worlds/demo-office/export/*-navigate.*
+# The viewpoint graph is derived from the tracked map in about a second, and
+# `test_vlngraph.py` rebuilds it from that map and asserts on what comes out.
+# Committing it as well would put a second copy of those numbers in the tree
+# with nothing comparing them, which is how the nav2 figures went stale.
+/public/worlds/demo-office/export/*-vlngraph.*
+
+# The synthetic fixture, on the same terms. It is the only world in the tree
+# that passes `vln_check.py`, which is what makes it worth its 11 kB: without a
+# map the gate says yes to, every test of that gate is a test that it says no.
+# `make_reference_world.py` regenerates the GLB, the exporter the .usdz, and
+# `vln_check.py` the graph -- so only the built map and the collider are kept.
+!/public/worlds/reference-rooms/
+!/public/worlds/reference-rooms/**
+/public/worlds/reference-rooms/export/*.usdz
+/public/worlds/reference-rooms/export/*-vlngraph.*
 
 # `build_collider.py` keeps the collider it is about to replace, so rebuilding a
 # generative world is reversible. For a tracked world that copy is redundant --

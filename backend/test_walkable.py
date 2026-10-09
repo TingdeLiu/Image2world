@@ -47,6 +47,51 @@ def test_grid_covers_the_floor(room: trimesh.Trimesh):
     assert np.allclose(floor_height[walkable], 0.025, atol=0.05)
 
 
+def test_same_collider_produces_identical_map_and_placement(room):
+    groups = {"floor": standable_faces(room)}
+    maps = [build_walkable_map(room, groups, flip_y=False, spawn_xz=(0, 0)) for _ in range(3)]
+    assert all(meta == maps[0][1] for _, meta in maps[1:])
+    assert all(png == maps[0][0] for png, _ in maps[1:])
+
+
+def test_flat_floor_has_no_sampling_holes():
+    # A decimated slab has two large top triangles. Every cell centre is on
+    # solid floor; a missing cell here is the mapper's error, not the capture's.
+    floor = slab(3.0, 3.0, 0.0)
+    grid, heights, meta = walkable_grid(floor, standable_faces(floor), flip_y=False)
+    assert meta["origin"] == [-1.5, -1.5]
+    assert grid.shape == (20, 20)
+    assert np.isfinite(heights).all()
+    assert grid.all()
+
+
+def test_real_gap_in_floor_is_preserved():
+    left = slab(1.5, 3.0, 0.0, offset_x=-1.05)
+    right = slab(1.5, 3.0, 0.0, offset_x=1.05)
+    floor = trimesh.util.concatenate([left, right])
+    grid, _, meta = walkable_grid(floor, standable_faces(floor), flip_y=False)
+    x = meta["origin"][0] + (np.arange(meta["cols"]) + 0.5) * CELL
+    gap = np.abs(x) < 0.29
+    assert gap.any()
+    assert not grid[:, gap].any(), "unobserved floor must not be filled in"
+
+
+def test_floor_rasterization_interpolates_height_on_a_slope():
+    floor = trimesh.Trimesh(
+        vertices=[[0, 0, 0], [3, 0.3, 0], [3, 0.3, 3], [0, 0, 3]],
+        faces=[[0, 2, 1], [0, 3, 2]], process=False,
+    )
+    _, heights, meta = walkable_grid(floor, np.array([0, 1]), flip_y=False)
+    expected = np.broadcast_to((np.arange(meta["cols"]) + 0.5) * CELL * 0.1, heights.shape)
+    np.testing.assert_allclose(heights, expected)
+
+
+def test_bad_scale_cannot_allocate_an_unbounded_grid():
+    floor = slab(1000, 1000, 0)
+    with pytest.raises(ValueError, match="grid too large"):
+        walkable_grid(floor, standable_faces(floor), flip_y=False)
+
+
 def test_a_stepped_floor_is_not_its_own_ceiling():
     """The regression the skirt exists for.
 

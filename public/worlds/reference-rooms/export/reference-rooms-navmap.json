@@ -1,0 +1,112 @@
+{
+  "usd": "D:/Tyndall Labs/image2world/public/worlds/reference-rooms/export/reference-rooms.usdz",
+  "cell_size": 0.05,
+  "robot_height": 0.6,
+  "isaac_sim": "6.0.1-rc.7+release.42383.32955d8d.gl",
+  "world_size_m": [
+    16.2,
+    12.2,
+    2.6
+  ],
+  "floor_top_z": 0.1,
+  "floor_top_from": "the collider's floor part",
+  "omap": {
+    "grid": [
+      323,
+      242
+    ],
+    "occupied": 4274,
+    "free": 63463,
+    "cells": 78166
+  },
+  "clearance_probe": {
+    "used": "box",
+    "ray_blocked": 0,
+    "box_blocked": 4553,
+    "both": 0,
+    "box_only": 4553,
+    "ray_only": 0
+  },
+  "border": {
+    "m": 0.5,
+    "cells": 10
+  },
+  "max_step": 0.1,
+  "step_edges": {
+    "cells": 150,
+    "m2": 0.38
+  },
+  "obstacle_blobs": {
+    "count": 8,
+    "largest_cells": 3122,
+    "specks_1_2_cells": 0,
+    "sizes": [
+      120,
+      120,
+      198,
+      481,
+      481,
+      840,
+      1141,
+      3122
+    ]
+  },
+  "robot_radius": 0.0,
+  "step_limit_sweep": {
+    "0.03": 62794,
+    "0.05": 62794,
+    "0.10": 62794,
+    "0.20": 62794
+  },
+  "reachability": {
+    "regions": 37,
+    "kept": 62794,
+    "dropped": 7503,
+    "dropped_m2": 18.76,
+    "seed_cell": [
+      15,
+      15
+    ],
+    "world_origin_reachable": true
+  },
+  "walkable_ground_z": {
+    "floor_top": 0.1,
+    "band_top": 0.22,
+    "p0": 0.1,
+    "p50": 0.1,
+    "p95": 0.1,
+    "p99": 0.1,
+    "p100": 0.1,
+    "before_filters": {
+      "p0": 0.1,
+      "p50": 0.1,
+      "p95": 0.1,
+      "p99": 0.1,
+      "p100": 0.1
+    }
+  },
+  "raycast": {
+    "grid": [
+      345,
+      264
+    ],
+    "cast_from_z": 0.7,
+    "free": 62794,
+    "occupied": 6503,
+    "unknown": 21783,
+    "free_before_filters": 70447,
+    "free_m2": 156.99,
+    "occupied_m2": 16.26,
+    "unknown_m2": 54.46,
+    "unknown_holes": 5375,
+    "unknown_holes_m2": 13.44,
+    "unknown_outside": 16408,
+    "origin": [
+      -8.600000381469727,
+      -6.599999904632571,
+      0.0
+    ]
+  },
+  "navmap_png": "D:/Tyndall Labs/image2world/public/worlds/reference-rooms/export/reference-rooms-navmap.png",
+  "navmap_yaml": "D:/Tyndall Labs/image2world/public/worlds/reference-rooms/export/reference-rooms-navmap.yaml"
+}

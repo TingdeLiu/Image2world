@@ -103,15 +103,15 @@
     "free_m2": 15.95,
     "occupied_m2": 9.78,
     "unknown_m2": 66.29,
-    "unknown_holes": 19194,
-    "unknown_holes_m2": 47.99,
-    "unknown_border": 7320,
+    "unknown_holes": 222,
+    "unknown_holes_m2": 0.56,
+    "unknown_outside": 26292,
     "origin": [
       -4.611592067816673,
       -2.2291096275821483,
       0.0
     ]
   },
-  "navmap_png": "D:\\Tyndall Labs\\image2world\\public\\worlds\\demo-office\\export\\demo-office-navmap.png",
-  "navmap_yaml": "D:\\Tyndall Labs\\image2world\\public\\worlds\\demo-office\\export\\demo-office-navmap.yaml"
+  "navmap_png": "D:/Tyndall Labs/image2world/public/worlds/demo-office/export/demo-office-navmap.png",
+  "navmap_yaml": "D:/Tyndall Labs/image2world/public/worlds/demo-office/export/demo-office-navmap.yaml"
 }

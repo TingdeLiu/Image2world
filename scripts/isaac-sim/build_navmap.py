@@ -722,18 +722,31 @@ if shipped_ground:
 free_n = int((grid == FREE).sum())
 occ_n = int((grid == OCCUPIED).sum())
 unk_n = int((grid == UNKNOWN).sum())
-# Split the unknown count, because the two halves mean opposite things. The ring
-# is a deliberate margin and says nothing about the reconstruction; the rest is
-# where the reconstruction left no floor, and that is the number worth watching
-# between runs. Reporting only the total would make every map look worse the
-# moment the border was added.
-ring_n = nx * ny - (nx - 2 * border_cells) * (ny - 2 * border_cells) if border_cells else 0
-holes_n = unk_n - ring_n
+# Split the unknown count, because the two halves mean opposite things, and
+# split it by asking where the cells are rather than by arithmetic on the border
+# width. `unk_n - ring_n` was the arithmetic, and it called everything outside
+# the reconstructed shell a hole in the floor: on demo-office it reported 47.99
+# m2 missing where the cells actually enclosed by the map come to 0.56 m2, an
+# 85x overstatement. That is the number you would look at to decide whether a
+# floor is complete enough to build a dataset on, so it has to mean what its
+# name says.
+#
+# Flood the unknown from the outer edge. What the flood reaches is outside --
+# the deliberate border ring and everything past the walls, neither of which is
+# a defect. What it cannot reach is enclosed by mapped cells, and that is floor
+# the reconstruction genuinely failed to produce.
+edge = np.zeros(grid.shape, dtype=bool)
+edge[0, :] = edge[-1, :] = True
+edge[:, 0] = edge[:, -1] = True
+unknown_mask = grid == UNKNOWN
+outside = flood(unknown_mask, edge & unknown_mask)
+holes_n = int((unknown_mask & ~outside).sum())
+ring_n = unk_n - holes_n
 print(f"  grid {nx}x{ny} @ {args.cell_size} m")
 print(f"  free={free_n} ({free_n * c2:.1f} m2)  occupied={occ_n} ({occ_n * c2:.1f} m2)  "
       f"unmapped={unk_n} ({unk_n * c2:.1f} m2)   [raw free was {raw_free}]")
-print(f"  of the unmapped, {holes_n} ({holes_n * c2:.1f} m2) is missing floor "
-      f"and {ring_n} ({ring_n * c2:.1f} m2) is the border")
+print(f"  of the unmapped, {holes_n} ({holes_n * c2:.1f} m2) is floor missing "
+      f"from inside the map and {ring_n} ({ring_n * c2:.1f} m2) is outside it")
 
 report["raycast"] = {
     "grid": [nx, ny],
@@ -745,7 +758,10 @@ report["raycast"] = {
     "unknown_m2": round(unk_n * c2, 2),
     "unknown_holes": holes_n,
     "unknown_holes_m2": round(holes_n * c2, 2),
-    "unknown_border": ring_n,
+    # Renamed from `unknown_border`, which was true only while the number was
+    # the border ring's area. It is now everything the flood reached from the
+    # edge: the ring plus the space beyond the reconstructed walls.
+    "unknown_outside": ring_n,
     "origin": [x0, y0, 0.0],
 }
 
@@ -766,8 +782,12 @@ with open(yaml_path, "w", encoding="utf-8") as fh:
     fh.write(f"resolution: {args.cell_size}\n")
     fh.write(f"origin: [{x0}, {y0}, 0.0]\n")
     fh.write("negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n")
-report["navmap_png"] = png
-report["navmap_yaml"] = yaml_path
+# Normalised, because otherwise the report records however the caller happened
+# to spell `--out`: the same build run twice, once with a relative path and once
+# absolute, produced two different JSON files and a diff that looked like the
+# map had changed when only the command line had.
+report["navmap_png"] = os.path.abspath(png).replace("\\", "/")
+report["navmap_yaml"] = os.path.abspath(yaml_path).replace("\\", "/")
 print(f"  wrote {png}\n  wrote {yaml_path}")
 
 with open(os.path.join(args.out, f"{name}-navmap.json"), "w", encoding="utf-8") as fh:

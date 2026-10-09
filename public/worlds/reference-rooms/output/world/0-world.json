@@ -1,0 +1,14 @@
+{
+  "world_id": "reference-rooms",
+  "display_name": "Reference rooms",
+  "assets": {
+    "splats": {
+      "spz_urls": {},
+      "semantics_metadata": {
+        "metric_scale_factor": 1.0,
+        "ground_plane_offset": 0.0,
+        "flip_y": false
+      }
+    }
+  }
+}

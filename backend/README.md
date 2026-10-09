@@ -326,9 +326,10 @@ Nerfstudio/gsplat 环境中联合优化。失败后可以分别用 `--reuse-sfm`
 `--reuse-training` 复用中间结果。
 
 任务接口会把状态和日志持久化到 `.artifacts/reconstruction-jobs/<job-id>/`。可用质量档位为
-`preview`、`standard`、`quality`；浏览器直接上传到 FastAPI，训练完成后由 Next.js 的
+`preview`、`standard`、`quality`、`navigation`；其中 `navigation` 使用更密的帧采样和
+更大的顺序匹配窗口，并在 GPU 训练前检查注册率、注册帧数和轨迹覆盖率。浏览器直接上传到 FastAPI，训练完成后由 Next.js 的
 `/api/video-reconstruction/finalize` 打包 full-res/500k/150k/100k PLY、缩略图、碰撞网格和
-`scene.json`。后端重启后未完成任务会标为 `interrupted`，可通过
+`scene.json`；导航档位还会拒绝没有足够可达地面或连通性过低的最终碰撞体。后端重启后未完成任务会标为 `interrupted`，可通过
 `POST /api/reconstruction-jobs/<job-id>/resume` 从已有 SfM/检查点继续。
 
 本机 RTX 5060 Ti 的依赖要求：PyTorch CUDA 12.8、CUDA Toolkit 12.8，以及 WSL2。
@@ -337,7 +338,8 @@ Nerfstudio/gsplat 环境中联合优化。失败后可以分别用 `--reuse-sfm`
 
 仓库内 `docs/media/demo-loop.mp4` 是二次渲染的展示视频，并非原始相机素材，COLMAP
 只能稳定注册 3/16 帧，因此仅用于验证全链路，不能代表算法画质上限。正式输入应把
-注册率至少做到 60%，并尽量提供 30–90 秒、慢速移动、有视差且少反光的原始视频。
+注册率至少做到 75%，并尽量提供 30–90 秒、慢速移动、有视差且少反光的原始视频；导航档位还要求
+至少 24 个注册帧和覆盖多个相连空间。
 
 ---
 

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.reconstruction_jobs import ReconstructionJobManager, progress_from_output
-from backend.tools.splatfacto_prototype import recommended_initial_view
+from backend.reconstruction_jobs import QUALITY_PROFILES, ReconstructionJobManager, progress_from_output
+from backend.tools.splatfacto_prototype import capture_metrics, recommended_initial_view, validate_capture
 
 
 def test_progress_parser_maps_sfm_and_training():
@@ -40,6 +40,53 @@ def test_job_creation_uses_quality_profile(tmp_path: Path):
     assert state["iterations"] == 30_000
     assert state["camera_scale"] == 0.75
     assert json.loads((tmp_path / state["id"] / "job.json").read_text())["status"] == "uploading"
+
+
+def test_navigation_profile_prioritizes_coverage_and_has_capture_gates():
+    profile = QUALITY_PROFILES["navigation"]
+    assert profile["target_frames"] > QUALITY_PROFILES["quality"]["target_frames"]
+    assert profile["iterations"] > QUALITY_PROFILES["quality"]["iterations"]
+    assert profile["frames_per_window"] == 1
+    assert profile["sequential_overlap"] >= 8
+    assert profile["min_registration_rate"] >= 0.75
+    assert profile["min_registered_frames"] >= 24
+    assert profile["min_trajectory_coverage"] >= 0.05
+
+
+def test_capture_metrics_and_navigation_gate(tmp_path: Path):
+    scene_path = tmp_path / "scene_sfm.json"
+    scene_path.write_text(
+        json.dumps({
+            "frames": [
+                {"camera_centre": [0, 0, 0]},
+                {"camera_centre": [2, 0, 0]},
+                {"camera_centre": [4, 0, 0]},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    import numpy as np
+
+    np.savez(scene_path.with_suffix(".npz"), points_xyz=np.asarray([
+        [0, 0, 0], [2, 0, 0], [4, 0, 0],
+    ], dtype=float))
+
+    metrics = capture_metrics(scene_path, total_frames=4)
+    assert metrics["registered_frames"] == 3
+    assert metrics["extracted_frames"] == 4
+    assert metrics["registration_rate"] == pytest.approx(0.75)
+    assert metrics["trajectory_span"] == pytest.approx(4.0)
+    assert metrics["trajectory_length"] == pytest.approx(4.0)
+    assert metrics["trajectory_coverage"] > 1.0
+    validate_capture(
+        metrics,
+        min_registration_rate=0.75,
+        min_registered_frames=3,
+        min_trajectory_coverage=0.05,
+    )
+
+    with pytest.raises(RuntimeError, match="Navigation capture rejected"):
+        validate_capture(metrics, min_registration_rate=0.9)
 
 
 def test_rejects_non_video_upload(tmp_path: Path):
