@@ -79,6 +79,17 @@ def test_quaternion_of_round_trips_a_rotation(angle):
     np.testing.assert_allclose(rebuilt, rotation, atol=1e-12)
 
 
+def test_a_half_turn_one_ulp_off_still_has_exact_zeros():
+    # `linear / scale` can land a diagonal entry one ulp short of -1, depending
+    # on which floating-point path the runner's numpy takes. Taking a square
+    # root of every component then turns that 2**-52 into w = 2**-27 =
+    # 7.45e-9 -- exactly what CI reported, on some runners and not others.
+    rotation = np.diag([1.0, -1.0, -(1.0 - 2.0 ** -52)])
+    w, x, y, z = quaternion_of(rotation)
+    assert (w, y, z) == (0.0, 0.0, 0.0)
+    assert abs(x) == 1.0
+
+
 def test_windows_paths_reach_wsl(monkeypatch):
     monkeypatch.setattr("sys.platform", "linux")
     assert str(local_path("D:/Tyndall Labs/x.ply")).replace("\\", "/") == "/mnt/d/Tyndall Labs/x.ply"
