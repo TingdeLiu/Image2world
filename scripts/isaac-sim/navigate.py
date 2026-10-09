@@ -89,6 +89,11 @@ parser.add_argument("--recoveries", type=int, default=6,
 parser.add_argument("--recovery-radius", type=float, default=0.45,
                     help="how much of the way ahead to write off after a stall, metres")
 parser.add_argument("--headless", action="store_true")
+parser.add_argument("--record", metavar="DIR",
+                    help="also film the run -- first-person, chase and plan-view frames "
+                         "for compose_video.py. Renders at native resolution (DLAA)")
+parser.add_argument("--record-every", type=int, default=2,
+                    help="keep every Nth rendered frame; 2 is 25 fps for a 50 Hz policy")
 parser.add_argument("--out", help="directory for the report and the overlay")
 parser.add_argument("--show-collider", action="store_true",
                     help="look at the collision mesh instead of the splat")
@@ -232,7 +237,12 @@ print(f"  {tuple(round(v, 2) for v in waypoints[0])} -> "
 
 from isaacsim import SimulationApp  # noqa: E402
 
-simulation_app = SimulationApp({"headless": args.headless})
+# DLAA when filming: anti-aliasing at native resolution. The default is DLSS in
+# its Performance mode, which renders at about half the resolution and upscales
+# -- fine for watching a robot, and exactly what blurs the detail a Gaussian
+# splat is there to show.
+simulation_app = SimulationApp({"headless": args.headless,
+                                **({"anti_aliasing": 4} if args.record else {})})
 
 import omni.timeline  # noqa: E402
 import omni.usd  # noqa: E402
@@ -354,6 +364,21 @@ for index, spec in enumerate(args.obstacle):
     UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     print(f"dropped a {side:.2f} x {side:.2f} x {tall:.2f} m box at ({ox}, {oy}) "
           f"that the map does not have")
+
+recorder = None
+if args.record:
+    from recorder import Recorder
+
+    recorder = Recorder(stage, os.path.abspath(args.record), every=args.record_every)
+    # The plan view frames the route with a margin, at the aspect of the panel
+    # compose_video.py puts it in, cut just under a 2.8 m ceiling.
+    xs, ys = [w[0] for w in waypoints], [w[1] for w in waypoints]
+    cx, cy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    half_w, half_h = (max(xs) - min(xs)) / 2.0 + 3.0, (max(ys) - min(ys)) / 2.0 + 3.0
+    aspect = 640.0 / 540.0
+    half_w, half_h = max(half_w, half_h * aspect), max(half_h, half_w / aspect)
+    recorder.render_topdown(simulation_app, (cx - half_w, cx + half_w, cy - half_h, cy + half_h),
+                            cut_z=floor_z + 2.3)
 
 robot = POLICY_CLASS(prim_path=f"/World/{args.robot}", position=spawn)
 policy_dt = getattr(robot, "_dt", None)
@@ -512,6 +537,10 @@ for frame in range(frames):
     if previous is not None:
         driven_m += math.hypot(here[0] - previous[0], here[1] - previous[1])
     previous = here
+    if recorder:
+        recorder.step(here, sim_seconds, {
+            "driven": round(driven_m, 3),
+            "to_goal": round(math.hypot(goal_xy[0] - here[0], goal_xy[1] - here[1]), 3)})
 
     if frame < settle_frames:
         base_command = torch.zeros(3)
@@ -680,6 +709,22 @@ out_json = os.path.join(out_dir, f"{name}-{args.robot}-navigate.json")
 with open(out_json, "w", encoding="utf-8") as fh:
     json.dump(report, fh, indent=2)
 print(f"wrote {out_json}")
+if recorder:
+    # Two more seconds of the robot standing where it ended, for the film only.
+    # After the report on purpose: run inside the measured loop, they were
+    # counted as run time and moved `seconds` and `standing_height_m`.
+    tail_seconds = sim_seconds
+    for _ in range(int(round(2.0 / render_dt))):
+        simulation_app.update()
+        tail_seconds += render_dt
+        here = pose()
+        recorder.step(here, tail_seconds, {
+            "driven": round(driven_m, 3),
+            "to_goal": round(math.hypot(goal_xy[0] - here[0], goal_xy[1] - here[1]), 3)})
+    recorder.close({key: report[key] for key in
+                    ("usd", "robot", "start", "goal", "arrived", "fell", "recoveries",
+                     "planned_m", "driven_m", "seconds", "cross_track_m", "waypoints")}
+                   | {"render_dt": render_dt})
 
 # --- the picture ---------------------------------------------------------
 # The numbers say how far it strayed; the overlay says *where*, which is what
