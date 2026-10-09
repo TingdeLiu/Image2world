@@ -60,6 +60,11 @@ export interface GenerationProgressPatch {
 
 const JOB_ID_PATTERN = /^[a-f0-9]{12}$/
 
+/** Validate an HTTP path parameter before passing it to the filesystem store. */
+export function isGenerationJobId(id: string): boolean {
+  return JOB_ID_PATTERN.test(id)
+}
+
 /**
  * How a running job proves it is still alive, and how it learns it was told to
  * stop.
@@ -87,7 +92,7 @@ function isAlive(job: GenerationJob, now = Date.now()) {
 function jobDir(id: string) {
   const resolved = path.resolve(JOB_ROOT, id)
   const relative = path.relative(JOB_ROOT, resolved)
-  if (!JOB_ID_PATTERN.test(id) || relative !== id) {
+  if (!isGenerationJobId(id) || relative !== id) {
     throw new Error('Invalid generation job id')
   }
   return resolved
@@ -146,7 +151,7 @@ export function readJob(id: string): GenerationJob | undefined {
 export function listJobs(): GenerationJob[] {
   if (!fs.existsSync(JOB_ROOT)) return []
   return fs.readdirSync(JOB_ROOT, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name))
+    .filter((entry) => entry.isDirectory() && isGenerationJobId(entry.name))
     .flatMap((entry) => readJob(entry.name) ?? [])
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 }

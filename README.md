@@ -375,6 +375,24 @@ Tests alone (Node's built-in runner, no extra dependencies):
 npm test
 ```
 
+For browser and HTTP regression checks, start the web server, then run:
+
+```bash
+python scripts/verify_landing.py
+python scripts/verify_api.py
+python scripts/verify_assets.py
+```
+
+These require Python Playwright (`pip install playwright` and
+`python -m playwright install chromium`). All accept `--url` for another local
+server address. The landing checks cover desktop/mobile layouts, upload
+validation, keyboard focus, and closing the modal. They isolate generation
+status so they never attach to an existing job. The API checks exercise the real
+route handlers with invalid requests and do not start generation.
+The asset checks create and remove an isolated fixture after the server starts,
+and verify streaming, byte ranges, caching, and path validation. Run them against
+`npm start` to catch production public-file indexing regressions.
+
 The USD exporter has its own suite, which also guards the transform semantics it
 duplicates from the TypeScript runtime:
 

@@ -252,6 +252,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
   const activeVideoJobRef = useRef<string | null>(null)
   const activeGenerationJobRef = useRef<string | null>(null)
   const generatingRef = useRef(false)
+  const dialogRef = useRef<HTMLDivElement>(null)
   const modalTitleId = useId()
 
   // The key is deliberately left out of the reset: it is a setting, not part of
@@ -352,6 +353,49 @@ export function CreateWorldModal({ open, onClose }: Props) {
     setSelectedFileUrl(url)
     return () => URL.revokeObjectURL(url)
   }, [selectedFile])
+
+  useEffect(() => {
+    if (!open) return
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    const focusableElements = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0)
+
+    const focusInside = () => {
+      if (!dialog.contains(document.activeElement)) {
+        const target = dialog.querySelector<HTMLElement>('#world-name') || focusableElements()[0] || dialog
+        target.focus({ preventScroll: true })
+      }
+    }
+    focusInside()
+
+    const trapTab = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const elements = focusableElements()
+      const first = elements[0] || dialog
+      const last = elements[elements.length - 1] || dialog
+      if (!dialog.contains(document.activeElement)
+        || (event.shiftKey ? document.activeElement === first : document.activeElement === last)
+        || document.activeElement === dialog) {
+        event.preventDefault()
+        const target = event.shiftKey ? last : first
+        target.focus({ preventScroll: true })
+      }
+    }
+    document.addEventListener('keydown', trapTab, true)
+    document.addEventListener('focusin', focusInside)
+    return () => {
+      document.removeEventListener('keydown', trapTab, true)
+      document.removeEventListener('focusin', focusInside)
+      document.body.style.overflow = previousOverflow
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true })
+    }
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -585,7 +629,9 @@ export function CreateWorldModal({ open, onClose }: Props) {
   return createPortal((
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
       <div
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={modalTitleId}
         className="relative flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl border border-white/12 bg-zinc-950/95 p-5 shadow-2xl shadow-black/70 sm:p-6"
@@ -773,7 +819,6 @@ export function CreateWorldModal({ open, onClose }: Props) {
                 id="world-name"
                 type="text"
                 required
-                autoFocus
                 maxLength={80}
                 value={worldName}
                 onChange={(e) => setWorldName(e.target.value)}

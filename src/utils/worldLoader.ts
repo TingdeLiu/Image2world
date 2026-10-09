@@ -1,4 +1,5 @@
 import { ViewerQuality, type World, type WorldEntry } from '../types/world'
+import { APP_REQUEST_HEADERS } from './sameOrigin'
 
 export function loadWorlds(): WorldEntry[] {
   // In Next.js, we pass initial worlds from Server Components, so default to empty
@@ -6,7 +7,7 @@ export function loadWorlds(): WorldEntry[] {
 }
 
 export async function fetchWorlds(): Promise<WorldEntry[]> {
-  const response = await fetch('/api/worlds', { cache: 'no-store' })
+  const response = await fetch('/api/worlds', { cache: 'no-store', headers: APP_REQUEST_HEADERS })
   if (!response.ok) throw new Error(await response.text())
   return response.json() as Promise<WorldEntry[]>
 }
