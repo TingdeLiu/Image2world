@@ -126,6 +126,7 @@ args = parser.parse_args()
 import numpy as np  # noqa: E402  -- before SimulationApp, which is fine and much faster
 
 import navmap  # noqa: E402
+import usdfloor  # noqa: E402
 
 # --- plan first, and refuse early ----------------------------------------
 # Starting Isaac Sim takes half a minute. If the goal is unreachable, or off the
@@ -163,14 +164,25 @@ print(f"passable for r={args.robot_radius} m "
       f"({'holes count as obstacles' if avoid_unknown else 'holes allowed, nav2 style'}): "
       f"{int(passable.sum())} cells ({int(passable.sum()) * carte.resolution ** 2:.1f} m2)")
 
+# Where the robot is dropped has to fit the whole body, not the planning disc.
+# `--robot-radius` is about half Spot's *width*; its body is 1.1 m long, so a
+# start 0.35 m from the edge of the map can put the rear feet over nothing. That
+# is not hypothetical: `dinghao-2f`'s origin sits on the edge of a hole the
+# scanner left where its operator stood, the nearest passable cell was 0.29 m
+# from it, and Spot fell in backwards 1.2 s after landing. Half-lengths are the
+# manufacturers' published body dimensions. Unknown cells always count here --
+# whatever --allow-unknown says about routes, there is no floor to land on.
+BODY_HALF_LENGTH = {"spot": 0.55, "anymal": 0.47, "go2": 0.35, "h1": 0.25}
+spawn_room = max(args.robot_radius, BODY_HALF_LENGTH[args.robot])
+standable = carte.passable(spawn_room, avoid_unknown=True) & passable
 start_xy = tuple(float(v) for v in args.start.split(","))
 start_cell = carte.cell_of(*start_xy)
-if not (carte.inside(start_cell) and passable[start_cell]):
-    moved = navmap.nearest_passable(passable, start_cell)
+if not (carte.inside(start_cell) and standable[start_cell]):
+    moved = navmap.nearest_passable(standable, start_cell)
     if moved is None:
-        raise SystemExit("no passable cell anywhere on this map")
-    print(f"start {start_xy} is not passable; nearest passable is "
-          f"{tuple(round(v, 2) for v in carte.world_of(*moved))}")
+        raise SystemExit(f"nowhere on this map has {spawn_room} m of room to drop the robot")
+    print(f"start {start_xy} does not leave {spawn_room} m of room for the body; "
+          f"nearest that does is {tuple(round(v, 2) for v in carte.world_of(*moved))}")
     start_cell = moved
 
 if args.goal:
@@ -300,12 +312,16 @@ if not (collider and collider.IsValid()):
     raise SystemExit("no collision mesh in this export -- nothing to walk on")
 cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
                           [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
-floor_prim = stage.GetPrimAtPath("/World/Ground/Background/Collider/floor")
-# The bbox *minimum*: the floor mesh spans a range and the low end is the ground
-# the robot stands on. `build_navmap.py` uses the maximum, for a different
-# question -- see its `floor_top`.
-floor_z = (float(cache.ComputeWorldBound(floor_prim).ComputeAlignedRange().GetMin()[2])
-           if floor_prim and floor_prim.IsValid() else 0.0)
+# The floor under the SPAWN, not the floor part's bbox minimum -- see
+# usdfloor.py for the run where the difference put Spot on its belly. It also
+# matters below: lying at 0.09 m read as 0.28 m above that minimum and passed
+# the 0.25 m fall test, so the run reported six recoveries from an obstacle that
+# was not there.
+spawn_xy = carte.world_of(*start_cell)
+floor_z, floor_note = usdfloor.spawn_floor(
+    stage, "/World/Ground/Background/Collider/floor", *spawn_xy, cache)
+if floor_note:
+    print(f"  !! {floor_note}")
 splat = stage.GetPrimAtPath("/World/Ground/Background/Splat")
 if splat and splat.IsValid() and not args.show_collider:
     UsdGeom.Imageable(collider).MakeInvisible()
@@ -314,7 +330,6 @@ else:
     if ceiling and ceiling.IsValid():
         UsdGeom.Imageable(ceiling).MakeInvisible()
 
-spawn_xy = carte.world_of(*start_cell)
 spawn = [spawn_xy[0], spawn_xy[1], floor_z + SPAWN_HEIGHT]
 print(f"floor z={floor_z:.3f}, spawn {tuple(round(v, 3) for v in spawn)} ({args.robot})")
 
