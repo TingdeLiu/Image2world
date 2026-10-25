@@ -311,6 +311,10 @@ python -m pytest backend/test_multiview.py -q
 
 ### Splatfacto 联合优化原型（推荐的视频路线）
 
+视频创建默认先做 2,000 步预览，再选择继续精修或直接使用预览。精修复用同一检查点、素材与参数，只补足目标训练预算；验证视角与最终测试视角分开。对照实验入口、检查点兼容和实际结果见 [预览、续训与画质实验](../docs/STAGED_RECONSTRUCTION.md)。
+
+重建导出后会自动评测未参与外观训练的保留视角，保存 PSNR / SSIM / LPIPS、观测与渲染对比图，以及相机位姿和尺度来源。发布后可在世界侧栏展开 **Reconstruction quality** 查看。评测不足或失败显示“未评测”；外观指标不代替导航检查。详见 [质量报告说明](../docs/RECONSTRUCTION_QUALITY.md)。
+
 逐帧 SHARP 再合并会把每一帧彼此矛盾的深度一起保留下来；Splatfacto 则让所有视频帧
 共同优化同一个 Gaussian 场景，直接针对重投影误差收敛。它现在已经接入创建世界弹窗；
 图片继续使用 `/api/generate`，视频使用可恢复的 `/api/reconstruction-jobs` 任务接口：

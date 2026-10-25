@@ -6,6 +6,7 @@ import { guardRoute } from '../../../../utils/routeGuard'
 import { currentUserId } from '../../../../utils/auth'
 import { buildWalkableMap } from '../../../../utils/walkableMap'
 import { writeSpzLevels, type SplatLevelFile } from '../../../../utils/spz'
+import { reconstructionScale, splatToInitialViewer, summarizeAppearanceQuality } from '../../../../utils/reconstructionQuality'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 900
@@ -41,6 +42,9 @@ interface ReconstructionJob {
   trajectory_coverage?: number
   gaussian_count?: number
   camera_height?: number
+  quality_report?: unknown
+  quality_report_path?: string
+  camera_metadata_path?: string
   initial_view?: {
     position?: [number, number, number]
     yaw?: number
@@ -245,15 +249,57 @@ export async function POST(request: NextRequest) {
       const normalizedCameraHeight = hasInitialPosition
         ? initialPosition[1] + rawGroundPlaneOffset
         : 0
-      const calibratedScale = typeof requestedCameraHeight === 'number'
-        && Number.isFinite(requestedCameraHeight)
-        && normalizedCameraHeight > 0.05
-        ? requestedCameraHeight / normalizedCameraHeight
-        : 1
-      const metricScaleFactor = calibratedScale >= 0.1 && calibratedScale <= 20
-        ? calibratedScale
-        : 1
+      const { factor: metricScaleFactor, provenance: scaleProvenance } = reconstructionScale(
+        requestedCameraHeight, normalizedCameraHeight,
+      )
       const groundPlaneOffset = rawGroundPlaneOffset * metricScaleFactor
+      const qualityReport = safeJobArtifact(jobId, job.quality_report_path)
+      let report: unknown = job.quality_report
+      if (qualityReport) {
+        try {
+          report = JSON.parse(fs.readFileSync(qualityReport, 'utf8'))
+        } catch {
+          report = { status: 'unavailable', reason: 'The saved quality report could not be read.' }
+        }
+      }
+      const reconstruction = {
+        protocol: 'held-out-rgb-v1',
+        quality: summarizeAppearanceQuality(report),
+        scale: scaleProvenance,
+        splat_to_initial_viewer: splatToInitialViewer(metricScaleFactor, groundPlaneOffset, NERFSTUDIO_ROTATION_X),
+      }
+      if (qualityReport || report) {
+        const comparisonFiles: string[] = []
+        if (reconstruction.quality.status === 'measured') {
+          for (let index = 0; index < 3; index += 1) {
+            const comparison = qualityReport && safeJobArtifact(jobId, path.join(path.dirname(qualityReport), `comparison_${String(index).padStart(4, '0')}.jpg`))
+            if (comparison) {
+              const filename = `0-world-quality-comparison-${index}.jpg`
+              fs.copyFileSync(comparison, path.join(worldOutDir, filename))
+              comparisonFiles.push(filename)
+            }
+          }
+        }
+        const publishedReport = reconstruction.quality.status === 'measured'
+          ? { ...(report as Record<string, unknown>), examples: comparisonFiles }
+          : { version: 1, protocol: reconstruction.protocol, ...reconstruction.quality, metrics: {}, examples: [] }
+        fs.writeFileSync(path.join(worldOutDir, '0-world-quality.json'), JSON.stringify(publishedReport, null, 2))
+      }
+      const cameras = safeJobArtifact(jobId, job.camera_metadata_path)
+      if (cameras) {
+        try {
+          const bundle = JSON.parse(fs.readFileSync(cameras, 'utf8'))
+          if (bundle?.version === 1 && Array.isArray(bundle.frames)) {
+            fs.writeFileSync(path.join(worldOutDir, '0-world-cameras.json'), JSON.stringify({
+              ...bundle,
+              splat_to_initial_viewer: reconstruction.splat_to_initial_viewer,
+              initial_viewer_scale: scaleProvenance,
+            }, null, 2))
+          }
+        } catch (error) {
+          console.warn('[Video reconstruction] Optional camera metadata could not be published:', error)
+        }
+      }
       // Navigation worlds need a usable connected floor, not just a visually
       // plausible splat. Build the map before publishing so a missing collider
       // or mostly unreachable reconstruction cannot enter the training set.
@@ -299,6 +345,7 @@ export async function POST(request: NextRequest) {
         reconstruction_job_id: jobId,
         notes: `Generated locally with COLMAP + Nerfstudio Splatfacto (${job.quality}); ${job.registered_frames ?? '?'} of ${job.extracted_frames ?? '?'} frames registered`,
         navigation_quality: navigationQuality,
+        reconstruction_quality: reconstruction,
         ...(owner ? { owner } : {}),
       }, null, 2))
 
@@ -308,6 +355,7 @@ export async function POST(request: NextRequest) {
         created_at: now,
         updated_at: now,
         assets: {
+          reconstruction,
           caption: `${job.registered_frames ?? '?'} registered frames, ${job.gaussian_count ?? '?'} Gaussians`,
           splats: {
             spz_urls: { full_res: '' },

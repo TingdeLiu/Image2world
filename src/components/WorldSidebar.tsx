@@ -35,6 +35,7 @@ import { ViewerQuality } from '../types/world'
 import { AppButton } from './AppButton'
 import { ChromeThumbnail, chrome } from './AppChrome'
 import { CreateWorldModal } from './CreateWorldModal'
+import { WorldQualityDetails } from './WorldQualityDetails'
 
 const CONTROLLER_MODES: readonly { mode: ControllerMode; label: string }[] = [
   { mode: 'fly', label: 'Fly' },
@@ -510,6 +511,9 @@ export function WorldSidebar({
                             </AppButton>
                           )}
                         </div>
+                      )}
+                      {isActive && displayWorld?.assets.reconstruction && (
+                        <WorldQualityDetails reconstruction={displayWorld.assets.reconstruction} />
                       )}
                       {objectAssets.map((obj) => {
                         const objectLoading = !obj.complete && isLoadingStatus(obj.status)

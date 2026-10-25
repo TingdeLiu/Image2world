@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 try:  # package import under pytest, script import under `python backend/server.py`
     from .gpu_scheduler import GPU_JOB_LOCK
@@ -97,6 +98,7 @@ QUALITY_PROFILES: dict[str, dict[str, int | float]] = {
         "min_trajectory_coverage": 0.05,
     },
 }
+PREVIEW_ITERATIONS = 2000
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 STEP_RE = re.compile(r"\bStep\s+(\d+)\b", re.IGNORECASE)
@@ -148,6 +150,8 @@ def progress_from_output(text: str, iterations: int) -> dict[str, Any] | None:
         return {"stage": "sfm", "progress": 18, "message": "Matching adjacent frames"}
     if "incremental mapping" in lowered:
         return {"stage": "sfm", "progress": 23, "message": "Solving camera positions"}
+    if "evaluate_reconstruction.py" in lowered or "[quality]" in lowered:
+        return {"stage": "evaluating", "progress": 96, "message": "Checking held-out views"}
     if "ns-export" in lowered or "gaussians have" in lowered:
         return {"stage": "exporting", "progress": 94, "message": "Exporting Gaussian PLY"}
     return None
@@ -207,6 +211,7 @@ class ReconstructionJobManager:
         filename: str,
         content_type: str | None,
         camera_height: float | None,
+        preview_first: bool = False,
     ) -> tuple[dict[str, Any], Path]:
         if quality not in QUALITY_PROFILES:
             raise ValueError(f"Unknown quality profile: {quality}")
@@ -225,6 +230,9 @@ class ReconstructionJobManager:
             "id": job_id,
             "name": name,
             "quality": quality,
+            "preview_first": preview_first,
+            "phase": "preview" if preview_first else "final",
+            "run_iterations": min(PREVIEW_ITERATIONS, int(profile["iterations"])) if preview_first else profile["iterations"],
             "status": "uploading",
             "stage": "uploading",
             "progress": 1,
@@ -294,6 +302,8 @@ class ReconstructionJobManager:
             state = self._read(job_id)
             if state["status"] in {"queued", "running", "canceling"}:
                 raise ValueError("Job is already active")
+            if state["status"] == "awaiting_review":
+                raise ValueError("Choose refinement or accept the preview before continuing")
             if resume and not self._has_reusable_work(job_id):
                 raise ValueError("Job has no reusable SfM data or checkpoint")
             state.update(
@@ -380,7 +390,7 @@ class ReconstructionJobManager:
                     "--target-frames",
                     str(state["target_frames"]),
                     "--iterations",
-                    str(state["iterations"]),
+                    str(state.get("run_iterations", state["iterations"])),
                     "--camera-scale",
                     str(state["camera_scale"]),
                     "--frames-per-window",
@@ -397,9 +407,15 @@ class ReconstructionJobManager:
                     "5000",
                     "--eval-every",
                     "50000",
+                    "--evaluation-split",
+                    "val" if state.get("phase") == "preview" else "test",
+                    "--scale-regularization",
+                    state.get("scale_regularization", "off"),
                 ]
                 if resume:
                     command.extend(["--reuse-sfm", "--resume-training"])
+                if state.get("reuse_training"):
+                    command.append("--reuse-training")
 
                 # The GPU lock is held here, so nothing is mid-inference: this is
                 # the one safe moment to hand the card over to the subprocess.
@@ -432,7 +448,7 @@ class ReconstructionJobManager:
                     assert process.stdout is not None
                     for line in process.stdout:
                         log.write(line)
-                        progress = progress_from_output(line, int(state["iterations"]))
+                        progress = progress_from_output(line, int(state.get("run_iterations", state["iterations"])))
                         if progress:
                             self._update_progress(job_id, progress)
 
@@ -478,10 +494,10 @@ class ReconstructionJobManager:
                     completed = self._read(job_id)
                     completed.update(
                         {
-                            "status": "complete",
-                            "stage": "complete",
+                            "status": "awaiting_review" if state.get("phase") == "preview" else "complete",
+                            "stage": "awaiting_review" if state.get("phase") == "preview" else "complete",
                             "progress": 100,
-                            "message": "Gaussian world ready",
+                            "message": "Preview ready for review" if state.get("phase") == "preview" else "Gaussian world ready",
                             "detail": f"{prototype.get('gaussian_count', 0):,} Gaussians",
                             "registered_frames": prototype.get("registered_frames"),
                             "extracted_frames": prototype.get("extracted_frames"),
@@ -494,6 +510,11 @@ class ReconstructionJobManager:
                             "output_ply": str(output_ply),
                             "config": prototype.get("config"),
                             "initial_view": prototype.get("initial_view"),
+                            "quality_report": prototype.get("quality_report"),
+                            "quality_report_path": prototype.get("quality_report_path"),
+                            "camera_metadata_path": prototype.get("camera_metadata_path"),
+                            "dataset_fingerprint": prototype.get("dataset_fingerprint"),
+                            "independent_test": prototype.get("independent_test"),
                             "thumbnail_path": str(thumbnail) if thumbnail.exists() else None,
                             "resumable": True,
                         }
@@ -506,14 +527,21 @@ class ReconstructionJobManager:
                 pass
         finally:
             with self._lock:
-                self._processes.pop(job_id, None)
-                self._threads.pop(job_id, None)
+                # Review can queue the next phase as soon as the previous
+                # phase persists its result. Its worker must keep its handles.
+                if self._threads.get(job_id) is threading.current_thread():
+                    self._processes.pop(job_id, None)
+                    self._threads.pop(job_id, None)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         with self._lock:
             state = self._read(job_id)
             if state["status"] in {"complete", "failed", "canceled", "interrupted"}:
                 return state
+            if state["status"] in {"awaiting_review", "queued"}:
+                state.update({"status": "canceled", "stage": "canceled", "cancel_requested": True,
+                              "message": "Reconstruction canceled", "resumable": self._has_reusable_work(job_id)})
+                return self._write(job_id, state)
             state.update(
                 {
                     "status": "canceling",
@@ -546,6 +574,31 @@ class ReconstructionJobManager:
     def resume(self, job_id: str) -> dict[str, Any]:
         return self.start(job_id, resume=True)
 
+    def review(self, job_id: str, *, refine: bool) -> dict[str, Any]:
+        with self._lock:
+            state = self._read(job_id)
+            if state["status"] != "awaiting_review":
+                raise ValueError("This job is not waiting for preview review")
+            if not any((self._job_dir(job_id) / "work" / "training").rglob("*.ckpt")):
+                raise ValueError("Preview checkpoint is missing; refinement cannot resume safely")
+            state.update({"status": "ready", "phase": "final", "progress": 3,
+                          "reuse_training": not refine,
+                          "preview_quality_report": state.get("quality_report"),
+                          "quality_report": None,
+                          "run_iterations": state["iterations"] if refine else state["run_iterations"]})
+            self._write(job_id, state)
+            return self.start(job_id, resume=True)
+
+    def preview_image(self, job_id: str, index: int) -> Path:
+        state = self.get(job_id)
+        if state["status"] not in {"awaiting_review", "complete"} or index not in range(3):
+            raise KeyError("Preview image is not available")
+        root = self._job_dir(job_id).resolve()
+        path = (root / "work" / "evaluation" / f"comparison_{index:04d}.jpg").resolve()
+        if root not in path.parents or not path.is_file():
+            raise KeyError("Preview image is not available")
+        return path
+
 
 manager = ReconstructionJobManager()
 router = APIRouter(prefix="/api/reconstruction-jobs", tags=["video reconstruction"])
@@ -561,7 +614,7 @@ def get_job_or_404(job_id: str) -> dict[str, Any]:
 # Absolute host paths. `finalize` needs them from the single-job endpoint (it
 # validates each one against JOB_ROOT/<id> before touching it), but the list is
 # a browsable index, and there they are only a map of the operator's disk.
-LISTING_HIDDEN_FIELDS = ("source_path", "output_ply", "thumbnail_path")
+LISTING_HIDDEN_FIELDS = ("source_path", "output_ply", "thumbnail_path", "quality_report_path", "camera_metadata_path")
 
 
 @router.get("")
@@ -579,6 +632,7 @@ async def create_reconstruction_job(
     name: str = Form(...),
     quality: str = Form("standard"),
     camera_height: float | None = Form(None),
+    preview_first: bool = Form(False),
 ):
     name = name.strip()
     if not name or len(name) > 80:
@@ -592,6 +646,7 @@ async def create_reconstruction_job(
             filename=file.filename or "source.mp4",
             content_type=file.content_type,
             camera_height=camera_height,
+            preview_first=preview_first,
         )
     except ValueError as error:
         raise HTTPException(status_code=415, detail=str(error)) from error
@@ -633,3 +688,29 @@ def resume_reconstruction_job(job_id: str):
         return manager.resume(job_id)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/{job_id}/refine", status_code=202)
+def refine_reconstruction_job(job_id: str):
+    get_job_or_404(job_id)
+    try:
+        return manager.review(job_id, refine=True)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/{job_id}/accept", status_code=202)
+def accept_reconstruction_preview(job_id: str):
+    get_job_or_404(job_id)
+    try:
+        return manager.review(job_id, refine=False)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get("/{job_id}/preview/{index}")
+def reconstruction_preview_image(job_id: str, index: int):
+    try:
+        return FileResponse(manager.preview_image(job_id, index), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Preview image not found") from error

@@ -27,6 +27,15 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    from .reconstruction_quality import export_camera_bundle, unavailable_report
+    from .view_splits import assign_view_splits, freeze_dataset, freeze_recipe
+    from .checkpoint_binding import remaining_training_steps
+except ImportError:  # CLI entrypoint
+    from reconstruction_quality import export_camera_bundle, unavailable_report
+    from view_splits import assign_view_splits, freeze_dataset, freeze_recipe
+    from checkpoint_binding import remaining_training_steps
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT = REPO_ROOT / ".artifacts" / "splatfacto-prototype"
@@ -137,6 +146,7 @@ def prepare_nerfstudio_dataset(scene_path: Path, dataset_dir: Path) -> tuple[int
             transforms["ply_file_path"] = ply_path.name
             has_seed_cloud = True
 
+    transforms = assign_view_splits(transforms)
     (dataset_dir / "transforms.json").write_text(
         json.dumps(transforms, indent=2), encoding="utf-8"
     )
@@ -355,6 +365,10 @@ def main() -> int:
     parser.add_argument("--wsl-venv", default=DEFAULT_WSL_VENV)
     parser.add_argument("--reuse-sfm", action="store_true", help="reuse <out>/sfm/scene_sfm.json")
     parser.add_argument("--reuse-training", action="store_true", help="reuse newest completed training run")
+    parser.add_argument("--skip-evaluation", action="store_true", help="record evaluation as unavailable instead of measuring held-out views")
+    parser.add_argument("--evaluation-split", choices=("val", "test"), default="test")
+    parser.add_argument("--scale-regularization", choices=("off", "on"), default="off")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--resume-training",
         action="store_true",
@@ -382,6 +396,9 @@ def main() -> int:
         "camera_scale": args.camera_scale,
         "frames_per_window": args.frames_per_window,
         "sequential_overlap": args.sequential_overlap,
+        "scale_regularization": args.scale_regularization,
+        "seed": args.seed,
+        "evaluation_split": args.evaluation_split,
         "min_registration_rate": args.min_registration_rate,
         "min_registered_frames": args.min_registered_frames,
         "min_trajectory_coverage": args.min_trajectory_coverage,
@@ -427,7 +444,16 @@ def main() -> int:
         # Refresh referenced files in place. Nerfstudio may briefly keep image
         # directory handles open after a failed WSL run, so deleting the whole
         # directory here makes an otherwise harmless retry flaky on Windows.
-        registered, has_seed_cloud = prepare_nerfstudio_dataset(scene_path, dataset_dir)
+        if (args.resume_training or args.reuse_training) and (dataset_dir / "transforms.json").exists():
+            frozen = json.loads((dataset_dir / "transforms.json").read_text(encoding="utf-8"))
+            registered, has_seed_cloud = len(frozen["frames"]), bool(frozen.get("ply_file_path"))
+        else:
+            registered, has_seed_cloud = prepare_nerfstudio_dataset(scene_path, dataset_dir)
+        manifest = freeze_dataset(dataset_dir)
+        state["dataset_fingerprint"] = manifest["fingerprint"]
+        state["independent_test"] = manifest["independent_test"]
+        freeze_recipe(out, {"camera_scale": args.camera_scale, "seed": args.seed,
+                            "scale_regularization": args.scale_regularization})
         state["registered_frames"] = registered
         state["sparse_seed_cloud"] = has_seed_cloud
         state.update({"stage": "training", "progress": 32})
@@ -451,6 +477,7 @@ def main() -> int:
         ]
         dataset_wsl = wsl_path(dataset_dir, args.wsl_distro)
         training_wsl = wsl_path(training_dir, args.wsl_distro)
+        train_entrypoint = [f"{args.wsl_venv}/bin/python", wsl_path(REPO_ROOT / "backend/tools/train_splatfacto.py", args.wsl_distro)] if args.resume_training else [ns_train]
 
         train_command = [
             "wsl.exe",
@@ -458,7 +485,7 @@ def main() -> int:
             args.wsl_distro,
             "--",
             *cuda_environment,
-            ns_train,
+            *train_entrypoint,
             "splatfacto",
             "--data",
             dataset_wsl,
@@ -476,12 +503,21 @@ def main() -> int:
             str(args.eval_every),
             "--pipeline.datamanager.camera-res-scale-factor",
             str(args.camera_scale),
+            "--pipeline.model.use-scale-regularization",
+            str(args.scale_regularization == "on"),
+            "--machine.seed",
+            str(args.seed),
             "--vis",
             "tensorboard",
         ]
+        remaining = args.iterations
         if args.resume_training:
             checkpoint = newest_checkpoint(training_dir)
             if checkpoint is not None:
+                completed = int(checkpoint.stem.split("-")[-1]) + 1
+                remaining = remaining_training_steps(args.iterations, completed)
+                state["resume_from_step"] = completed
+                train_command[train_command.index("--max-num-iterations") + 1] = str(remaining)
                 print(f"[prototype] resuming {checkpoint}", flush=True)
                 train_command.extend(
                     ["--load-dir", wsl_path(checkpoint.parent, args.wsl_distro)]
@@ -495,7 +531,8 @@ def main() -> int:
                     "2.0",
                 ]
             )
-        if args.reuse_training:
+        state["training_steps_this_run"] = 0 if args.reuse_training else remaining
+        if args.reuse_training or remaining == 0:
             print(f"[prototype] reusing newest training run under {training_dir}")
         else:
             state["timings_seconds"]["train"] = run(train_command)
@@ -524,6 +561,38 @@ def main() -> int:
         if not plys:
             raise RuntimeError(f"export finished without a PLY under {export_dir}")
         output_ply = max(plys, key=lambda path: path.stat().st_size)
+        # Preserve cameras in splat coordinates, not display-preview units.
+        # Reused checkpoints retain their original training/evaluation split.
+        try:
+            camera_path = out / "cameras.json"
+            export_camera_bundle(dataset_dir, config.parent / "dataparser_transforms.json", camera_path)
+            state["camera_metadata_path"] = str(camera_path)
+        except (ValueError, KeyError, OSError) as error:
+            state["camera_metadata_error"] = f"{type(error).__name__}: {error}"
+            print(f"[quality] camera export unavailable: {error}", flush=True)
+
+        state.update({"stage": "evaluating", "progress": 96})
+        write_state(state_path, state)
+        evaluation_path = out / "evaluation" / "report.json"
+        evaluation_path.parent.mkdir(parents=True, exist_ok=True)
+        quality = unavailable_report("Quality evaluation was skipped for this run.")
+        if not args.skip_evaluation:
+            try:
+                state["timings_seconds"]["evaluation"] = run([
+                    "wsl.exe", "-d", args.wsl_distro, "--", *cuda_environment,
+                    f"{args.wsl_venv}/bin/python",
+                    wsl_path(REPO_ROOT / "backend" / "tools" / "evaluate_reconstruction.py", args.wsl_distro),
+                    "--load-config", wsl_path(config, args.wsl_distro),
+                    "--output", wsl_path(evaluation_path, args.wsl_distro),
+                    "--split", args.evaluation_split,
+                ])
+                quality = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, subprocess.CalledProcessError) as error:
+                print(f"[quality] evaluation unavailable: {error}", flush=True)
+                quality = unavailable_report("Quality evaluation failed; see the reconstruction job log.")
+        write_state(evaluation_path, quality)
+        state["quality_report"] = quality
+        state["quality_report_path"] = str(evaluation_path)
         state.update(
             {
                 "status": "complete",
