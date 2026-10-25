@@ -16,9 +16,10 @@ import { useRouter } from 'next/navigation'
 import { AppButton } from './AppButton'
 import { MARBLE_KEYS_URL, REPO_URL } from '../utils/links'
 import { APP_REQUEST_HEADERS } from '../utils/sameOrigin'
+import { summarizeAppearanceQuality } from '../utils/reconstructionQuality'
 
 type BackendStatus = 'checking' | 'ready' | 'offline'
-type GenerationStage = 'initializing' | 'uploading' | 'sfm' | 'training' | 'exporting' | 'splat' | 'finalizing'
+type GenerationStage = 'initializing' | 'uploading' | 'sfm' | 'training' | 'exporting' | 'evaluating' | 'splat' | 'finalizing'
 type VideoQuality = 'preview' | 'standard' | 'quality' | 'navigation'
 
 interface GenerationUiProgress {
@@ -53,6 +54,7 @@ const GENERATION_STAGE_ORDER: GenerationStage[] = [
   'sfm',
   'training',
   'exporting',
+  'evaluating',
   'splat',
   'finalizing',
 ]
@@ -102,7 +104,9 @@ async function responseErrorMessage(response: Response) {
 
 interface ReconstructionJob {
   id: string
-  status: 'uploading' | 'queued' | 'running' | 'complete' | 'failed' | 'canceled' | 'canceling' | 'interrupted'
+  status: 'uploading' | 'queued' | 'running' | 'awaiting_review' | 'complete' | 'failed' | 'canceled' | 'canceling' | 'interrupted'
+  name?: string
+  quality_report?: unknown
   stage: string
   progress: number
   message: string
@@ -129,7 +133,7 @@ function abortableDelay(milliseconds: number, signal: AbortSignal) {
 }
 
 function videoProgress(job: ReconstructionJob): GenerationUiProgress {
-  const supported = new Set<GenerationStage>(['uploading', 'sfm', 'training', 'exporting', 'finalizing'])
+  const supported = new Set<GenerationStage>(['uploading', 'sfm', 'training', 'exporting', 'evaluating', 'finalizing'])
   const stage = supported.has(job.stage as GenerationStage)
     ? job.stage as GenerationStage
     : job.status === 'queued'
@@ -202,6 +206,14 @@ function friendlyFileName(file: File) {
 // Storage key keeps the old "imageworld" spelling on purpose: renaming it would
 // silently drop the API key users already saved. Display names use Image2World.
 const MARBLE_KEY_STORAGE = 'imageworld:marble-api-key'
+const VIDEO_JOB_STORAGE = 'imageworld:active-video-job'
+
+function rememberVideoJob(id: string | null) {
+  try {
+    if (id) window.localStorage.setItem(VIDEO_JOB_STORAGE, id)
+    else window.localStorage.removeItem(VIDEO_JOB_STORAGE)
+  } catch { /* Reattaching is optional when browser storage is unavailable. */ }
+}
 // The public demo serves a prebuilt world and has neither a GPU backend nor a
 // function timeout long enough for Marble, which takes about eight minutes
 // against a 60-300 s serverless ceiling. Offering the form there would let a
@@ -248,6 +260,8 @@ export function CreateWorldModal({ open, onClose }: Props) {
   const [selectedFileUrl, setSelectedFileUrl] = useState('')
   const [videoQuality, setVideoQuality] = useState<VideoQuality>('standard')
   const [cameraHeight, setCameraHeight] = useState(1.6)
+  const [previewFirst, setPreviewFirst] = useState(true)
+  const [previewJob, setPreviewJob] = useState<ReconstructionJob | null>(null)
   const generationAbortRef = useRef<AbortController | null>(null)
   const activeVideoJobRef = useRef<string | null>(null)
   const activeGenerationJobRef = useRef<string | null>(null)
@@ -265,6 +279,8 @@ export function CreateWorldModal({ open, onClose }: Props) {
     setFileError('')
     setVideoQuality('standard')
     setCameraHeight(1.6)
+    setPreviewFirst(true)
+    setPreviewJob(null)
     activeVideoJobRef.current = null
   }, [])
 
@@ -428,27 +444,17 @@ export function CreateWorldModal({ open, onClose }: Props) {
     if (!worldName) setWorldName(friendlyFileName(file))
   }
 
-  const runVideoReconstruction = async (
-    file: File,
+  const followVideoReconstruction = useCallback(async (
+    initialJob: ReconstructionJob,
     name: string,
     signal: AbortSignal,
-  ) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('name', name)
-    formData.append('quality', videoQuality)
-    formData.append('camera_height', String(cameraHeight))
-    const createdResponse = await fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs`, {
-      method: 'POST',
-      body: formData,
-      signal,
-    })
-    if (!createdResponse.ok) throw new Error(await responseErrorMessage(createdResponse))
-    let job = await createdResponse.json() as ReconstructionJob
+  ): Promise<string | null> => {
+    let job = initialJob
     activeVideoJobRef.current = job.id
+    rememberVideoJob(job.id)
     setGenerationProgress(videoProgress(job))
 
-    while (job.status !== 'complete') {
+    while (job.status !== 'complete' && job.status !== 'awaiting_review') {
       if (['failed', 'canceled', 'interrupted'].includes(job.status)) {
         throw new Error(job.error || job.message || `Reconstruction ${job.status}.`)
       }
@@ -461,6 +467,13 @@ export function CreateWorldModal({ open, onClose }: Props) {
       job = await statusResponse.json() as ReconstructionJob
       setGenerationProgress(videoProgress(job))
     }
+    if (job.status === 'awaiting_review') {
+      setPreviewJob(job)
+      return null
+    }
+    // Keep a completed GPU result available if asset publication fails. A
+    // retry must reuse it rather than uploading or training the video again.
+    setPreviewJob(job)
 
     setGenerationProgress({
       stage: 'finalizing',
@@ -477,7 +490,74 @@ export function CreateWorldModal({ open, onClose }: Props) {
     if (!finalResponse.ok) throw new Error(await responseErrorMessage(finalResponse))
     const finalized = await finalResponse.json() as { slug?: string }
     if (!finalized.slug) throw new Error('World publisher returned no world identifier.')
+    rememberVideoJob(null)
     return finalized.slug
+  }, [])
+
+  const watchVideoReconstruction = useCallback(async (job: ReconstructionJob, action?: 'refine' | 'accept') => {
+    if (generatingRef.current) return
+    generatingRef.current = true
+    setGenerating(true)
+    setGenerationError('')
+    const controller = new AbortController()
+    generationAbortRef.current = controller
+    activeVideoJobRef.current = job.id
+    try {
+      if (action) {
+        const response = await fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${job.id}/${action}`, {
+          method: 'POST', signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(await responseErrorMessage(response))
+        job = await response.json() as ReconstructionJob
+        setPreviewJob(null)
+      }
+      const slug = await followVideoReconstruction(job, job.name || 'Video world', controller.signal)
+      if (slug) {
+        onClose()
+        resetCreateForm()
+        router.push(`/${slug}`)
+      }
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : String(error))
+    } finally {
+      generatingRef.current = false
+      setGenerating(false)
+      activeVideoJobRef.current = null
+      if (generationAbortRef.current === controller) generationAbortRef.current = null
+    }
+  }, [followVideoReconstruction, onClose, resetCreateForm, router])
+
+  useEffect(() => {
+    if (!open || DEMO_MODE || generatingRef.current) return
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        let id: string | null = null
+        try { id = window.localStorage.getItem(VIDEO_JOB_STORAGE) } catch { /* optional storage */ }
+        const response = await fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs${id ? `/${id}` : ''}`, {
+          cache: 'no-store', signal: controller.signal,
+        })
+        if (!response.ok || generatingRef.current) return
+        const payload = await response.json() as ReconstructionJob & { jobs?: ReconstructionJob[] }
+        const job = id ? payload : payload.jobs?.find((candidate) => candidate.status === 'awaiting_review')
+        if (!job || controller.signal.aborted) return
+        if (job.status === 'awaiting_review') setPreviewJob(job)
+        else if (['queued', 'running', 'complete'].includes(job.status)) void watchVideoReconstruction(job)
+      } catch { /* An unavailable backend must not prevent creating an image world. */ }
+    })()
+    return () => controller.abort()
+  }, [open, watchVideoReconstruction])
+
+  const runVideoReconstruction = async (file: File, name: string, signal: AbortSignal) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('name', name)
+    formData.append('quality', videoQuality)
+    formData.append('camera_height', String(cameraHeight))
+    formData.append('preview_first', String(previewFirst))
+    const response = await fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs`, { method: 'POST', body: formData, signal })
+    if (!response.ok) throw new Error(await responseErrorMessage(response))
+    return followVideoReconstruction(await response.json() as ReconstructionJob, name, signal)
   }
 
   const handleCreateWorld = async (e: React.FormEvent) => {
@@ -512,7 +592,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
     generationAbortRef.current = generationController
 
     try {
-      let slug: string
+      let slug: string | null
       if (selectedVideo) {
         slug = await runVideoReconstruction(
           selectedFile,
@@ -550,6 +630,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
         setGenerationProgress(jobProgress(job))
         slug = await followGenerationJob(job.id, setGenerationProgress, generationController.signal)
       }
+      if (!slug) return
       setGenerationProgress({
         stage: 'finalizing',
         progress: 100,
@@ -589,6 +670,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
     generationAbortRef.current?.abort()
     if (videoJobId) {
       void fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${videoJobId}`, { method: 'DELETE' })
+      rememberVideoJob(null)
     }
     // Aborting the poller only stops watching; the job has to be told.
     if (generationJobId) {
@@ -625,6 +707,7 @@ export function CreateWorldModal({ open, onClose }: Props) {
   }
 
   if (!open) return null
+  const previewQuality = summarizeAppearanceQuality(previewJob?.quality_report)
 
   return createPortal((
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
@@ -758,6 +841,43 @@ export function CreateWorldModal({ open, onClose }: Props) {
             >
               Cancel generation
             </button>
+          </div>
+        ) : previewJob ? (
+          <div className="space-y-4 py-2">
+            <div>
+              <h3 className="text-sm font-semibold text-white">{previewJob.status === 'complete' ? 'Ready to publish' : 'Review your preview'}</h3>
+              <p className="mt-1 text-xs leading-relaxed text-white/55">{previewJob.name || 'Video world'}. Compare the recorded view on the left with the reconstruction on the right.</p>
+            </div>
+            {previewQuality.status === 'measured' && previewQuality.metrics ? (
+              <>
+                <a href={`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${previewJob.id}/preview/0`} target="_blank" rel="noreferrer">
+                  <NextImage src={`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${previewJob.id}/preview/0`} alt="Recorded view on the left and preview reconstruction on the right" unoptimized width={768} height={216} className="h-auto w-full rounded border border-white/10" />
+                </a>
+                <p className="text-xs text-white/65">{previewJob.status === 'complete' ? 'Final test' : 'Validation'}: PSNR {previewQuality.metrics.psnr.toFixed(1)} dB · SSIM {previewQuality.metrics.ssim.toFixed(3)} · LPIPS {previewQuality.metrics.lpips.toFixed(3)}</p>
+              </>
+            ) : <p className="text-xs text-amber-100/70">Preview evaluation unavailable. {previewQuality.reason}</p>}
+            <p className="text-xs leading-relaxed text-white/50">{previewJob.status === 'complete'
+              ? 'The reconstruction is saved. Retry publishing without uploading or training again.'
+              : 'Continue refining from this checkpoint, or use the preview as it is. Final test views are checked only after your choice.'}</p>
+            {generationError && <p role="alert" className="text-xs text-red-300">{generationError}</p>}
+            <div className="flex flex-wrap gap-2">
+              {previewJob.status === 'complete' ? (
+                <AppButton onClick={() => void watchVideoReconstruction(previewJob)} className="rounded bg-white px-3 py-2 text-xs font-semibold text-black">Retry publishing</AppButton>
+              ) : <>
+                <AppButton onClick={() => void watchVideoReconstruction(previewJob, 'refine')} className="rounded bg-white px-3 py-2 text-xs font-semibold text-black">Continue refining</AppButton>
+                <AppButton onClick={() => void watchVideoReconstruction(previewJob, 'accept')} className="rounded border border-white/20 px-3 py-2 text-xs text-white">Use preview</AppButton>
+              </>}
+              <AppButton onClick={async () => {
+                try {
+                  const response = await fetch(`${LOCAL_BACKEND_URL}/api/reconstruction-jobs/${previewJob.id}`, { method: 'DELETE' })
+                  if (!response.ok) { setGenerationError(await responseErrorMessage(response)); return }
+                  rememberVideoJob(null)
+                  setPreviewJob(null)
+                } catch (error) {
+                  setGenerationError(error instanceof Error ? error.message : 'Could not discard this preview.')
+                }
+              }} className="rounded px-3 py-2 text-xs text-white/55">Discard</AppButton>
+            </div>
           </div>
         ) : (
           <form onSubmit={handleCreateWorld} className="flex flex-col gap-4">
@@ -982,6 +1102,10 @@ export function CreateWorldModal({ open, onClose }: Props) {
                           ? '400 frames · 30k steps · denser coverage'
                           : '480 frames · 45k steps · tracking + coverage checks'}
                   </span>
+                  <label className="flex items-start gap-2 text-xs leading-relaxed text-white/65">
+                    <input type="checkbox" checked={previewFirst} onChange={(event) => setPreviewFirst(event.target.checked)} className="mt-1" />
+                    <span>Preview first. Review the result before the longer refinement.</span>
+                  </label>
                   {videoQuality === 'navigation' && (
                     <span className="font-mono text-[9px] leading-relaxed text-cyan-200/55">
                       Recommended for navigation training. Walk slowly through connected spaces and return near the start; incomplete tracks are rejected before training.

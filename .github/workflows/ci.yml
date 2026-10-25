@@ -56,6 +56,7 @@ jobs:
           python scripts/verify_landing.py
           python scripts/verify_api.py
           python scripts/verify_assets.py
+          python scripts/verify_preview_flow.py
 
   backend:
     name: Backend (CPU tests)
@@ -120,6 +121,9 @@ jobs:
             backend/test_props.py \
             backend/test_walkable.py \
             backend/test_reconstruction_jobs.py \
+            backend/test_reconstruction_quality.py \
+            backend/test_view_splits.py \
+            backend/test_checkpoint_binding.py \
             backend/test_unload.py \
             backend/test_render_viewpoints.py \
             scripts/usd-export/test_export.py \

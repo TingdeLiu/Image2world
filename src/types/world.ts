@@ -1,3 +1,25 @@
+export interface WorldAppearanceQuality {
+  status: 'measured' | 'unavailable'
+  reason?: string
+  train_views?: number
+  evaluation_views?: number
+  metrics?: { psnr: number; ssim: number; lpips: number }
+}
+
+export interface WorldReconstruction {
+  protocol: 'held-out-rgb-v1'
+  quality: WorldAppearanceQuality
+  scale: {
+    kind: 'camera-height-estimate' | 'arbitrary'
+    factor: number
+    camera_height_metres?: number
+  }
+  splat_to_initial_viewer?: number[][]
+  report_url?: string
+  cameras_url?: string
+  comparison_urls?: string[]
+}
+
 export interface WorldAssets {
   mesh: { collider_mesh_url: string }
   imagery: { pano_url: string }
@@ -21,6 +43,7 @@ export interface WorldAssets {
   props?: WorldProps
   /** Absent for worlds whose collider predates walkability analysis. */
   walkable?: WorldWalkable
+  reconstruction?: WorldReconstruction
 }
 
 /**

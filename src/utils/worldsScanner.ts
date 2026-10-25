@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
+import { normalizeWorldReconstruction } from './reconstructionQuality.ts'
 import type {
   World,
   WorldEntry,
@@ -530,6 +531,18 @@ function withLocalWorldAssets(slug: string, world: WorldManifest, index?: number
   const thumbnail = worldAssetFilename(files, index, 'world-thumbnail', IMAGE_EXTENSIONS)
   const props = readWorldProps(slug, files, index)
   const walkable = readWorldWalkable(slug, files, index)
+  const reconstruction = normalizeWorldReconstruction(world.assets?.reconstruction)
+  if (reconstruction) {
+    const jsonFiles = new Set(['.json'])
+    const report = worldAssetFilename(files, index, 'world-quality', jsonFiles)
+    const cameras = worldAssetFilename(files, index, 'world-cameras', jsonFiles)
+    if (report) reconstruction.report_url = worldAssetUrl(slug, report)
+    if (cameras) reconstruction.cameras_url = worldAssetUrl(slug, cameras)
+    reconstruction.comparison_urls = [0, 1, 2]
+      .map((n) => worldAssetFilename(files, index, `world-quality-comparison-${n}`, IMAGE_EXTENSIONS))
+      .filter((name): name is string => Boolean(name))
+      .map((name) => worldAssetUrl(slug, name))
+  }
 
   return {
     world_id: (world.world_id as string) ?? slug,
@@ -559,6 +572,7 @@ function withLocalWorldAssets(slug: string, world: WorldManifest, index?: number
       },
       ...(props ? { props } : {}),
       ...(walkable ? { walkable } : {}),
+      ...(reconstruction ? { reconstruction } : {}),
     },
   }
 }
