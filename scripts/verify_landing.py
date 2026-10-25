@@ -19,6 +19,7 @@ with sync_playwright() as playwright:
         # UI checks must not attach to an operator's running job or need a GPU.
         page.route("**/api/generate", lambda route: route.fulfill(json={"ready": True}))
         page.route("**/api/generate/jobs", lambda route: route.fulfill(json={"jobs": [], "active": None}))
+        page.route("**/api/reconstruction-jobs", lambda route: route.fulfill(json={"jobs": []}))
 
     desktop = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
     isolate_generation(desktop)
